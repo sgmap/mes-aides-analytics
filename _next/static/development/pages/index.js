@@ -23257,6 +23257,2690 @@ module.exports = shallowEqual;
 
 /***/ }),
 
+/***/ "./node_modules/iframe-resizer/index.js":
+/*!**********************************************!*\
+  !*** ./node_modules/iframe-resizer/index.js ***!
+  \**********************************************/
+/*! no static exports found */
+/***/ (function(module, exports, __webpack_require__) {
+
+"use strict";
+
+
+module.exports = __webpack_require__(/*! ./js */ "./node_modules/iframe-resizer/js/index.js")
+
+
+/***/ }),
+
+/***/ "./node_modules/iframe-resizer/js/iframeResizer.contentWindow.js":
+/*!***********************************************************************!*\
+  !*** ./node_modules/iframe-resizer/js/iframeResizer.contentWindow.js ***!
+  \***********************************************************************/
+/*! no static exports found */
+/***/ (function(module, exports, __webpack_require__) {
+
+/*
+ * File: iframeResizer.contentWindow.js
+ * Desc: Include this file in any page being loaded into an iframe
+ *       to force the iframe to resize to the content size.
+ * Requires: iframeResizer.js on host page.
+ * Doc: https://github.com/davidjbradshaw/iframe-resizer
+ * Author: David J. Bradshaw - dave@bradshaw.net
+ *
+ */
+
+// eslint-disable-next-line sonarjs/cognitive-complexity, no-shadow-restricted-names
+;(function(undefined) {
+  if (typeof window === 'undefined') return // don't run for server side render
+
+  var autoResize = true,
+    base = 10,
+    bodyBackground = '',
+    bodyMargin = 0,
+    bodyMarginStr = '',
+    bodyObserver = null,
+    bodyPadding = '',
+    calculateWidth = false,
+    doubleEventList = { resize: 1, click: 1 },
+    eventCancelTimer = 128,
+    firstRun = true,
+    height = 1,
+    heightCalcModeDefault = 'bodyOffset',
+    heightCalcMode = heightCalcModeDefault,
+    initLock = true,
+    initMsg = '',
+    inPageLinks = {},
+    interval = 32,
+    intervalTimer = null,
+    logging = false,
+    msgID = '[iFrameSizer]', // Must match host page msg ID
+    msgIdLen = msgID.length,
+    myID = '',
+    resetRequiredMethods = {
+      max: 1,
+      min: 1,
+      bodyScroll: 1,
+      documentElementScroll: 1
+    },
+    resizeFrom = 'child',
+    sendPermit = true,
+    target = window.parent,
+    targetOriginDefault = '*',
+    tolerance = 0,
+    triggerLocked = false,
+    triggerLockedTimer = null,
+    throttledTimer = 16,
+    width = 1,
+    widthCalcModeDefault = 'scroll',
+    widthCalcMode = widthCalcModeDefault,
+    win = window,
+    onMessage = function() {
+      warn('onMessage function not defined')
+    },
+    onReady = function() {},
+    onPageInfo = function() {},
+    customCalcMethods = {
+      height: function() {
+        warn('Custom height calculation function not defined')
+        return document.documentElement.offsetHeight
+      },
+      width: function() {
+        warn('Custom width calculation function not defined')
+        return document.body.scrollWidth
+      }
+    },
+    eventHandlersByName = {},
+    passiveSupported = false
+
+  function noop() {}
+
+  try {
+    var options = Object.create(
+      {},
+      {
+        passive: {
+          get: function() {
+            passiveSupported = true
+          }
+        }
+      }
+    )
+    window.addEventListener('test', noop, options)
+    window.removeEventListener('test', noop, options)
+  } catch (error) {
+    /* */
+  }
+
+  function addEventListener(el, evt, func, options) {
+    el.addEventListener(evt, func, passiveSupported ? options || {} : false)
+  }
+
+  function removeEventListener(el, evt, func) {
+    el.removeEventListener(evt, func, false)
+  }
+
+  function capitalizeFirstLetter(string) {
+    return string.charAt(0).toUpperCase() + string.slice(1)
+  }
+
+  // Based on underscore.js
+  function throttle(func) {
+    var context,
+      args,
+      result,
+      timeout = null,
+      previous = 0,
+      later = function() {
+        previous = getNow()
+        timeout = null
+        result = func.apply(context, args)
+        if (!timeout) {
+          // eslint-disable-next-line no-multi-assign
+          context = args = null
+        }
+      }
+
+    return function() {
+      var now = getNow()
+
+      if (!previous) {
+        previous = now
+      }
+
+      var remaining = throttledTimer - (now - previous)
+
+      context = this
+      args = arguments
+
+      if (remaining <= 0 || remaining > throttledTimer) {
+        if (timeout) {
+          clearTimeout(timeout)
+          timeout = null
+        }
+
+        previous = now
+        result = func.apply(context, args)
+
+        if (!timeout) {
+          // eslint-disable-next-line no-multi-assign
+          context = args = null
+        }
+      } else if (!timeout) {
+        timeout = setTimeout(later, remaining)
+      }
+
+      return result
+    }
+  }
+
+  var getNow =
+    Date.now ||
+    function() {
+      /* istanbul ignore next */ // Not testable in PhantonJS
+      return new Date().getTime()
+    }
+
+  function formatLogMsg(msg) {
+    return msgID + '[' + myID + '] ' + msg
+  }
+
+  function log(msg) {
+    if (logging && 'object' === typeof window.console) {
+      // eslint-disable-next-line no-console
+      console.log(formatLogMsg(msg))
+    }
+  }
+
+  function warn(msg) {
+    if ('object' === typeof window.console) {
+      // eslint-disable-next-line no-console
+      console.warn(formatLogMsg(msg))
+    }
+  }
+
+  function init() {
+    readDataFromParent()
+    log('Initialising iFrame (' + location.href + ')')
+    readDataFromPage()
+    setMargin()
+    setBodyStyle('background', bodyBackground)
+    setBodyStyle('padding', bodyPadding)
+    injectClearFixIntoBodyElement()
+    checkHeightMode()
+    checkWidthMode()
+    stopInfiniteResizingOfIFrame()
+    setupPublicMethods()
+    startEventListeners()
+    inPageLinks = setupInPageLinks()
+    sendSize('init', 'Init message from host page')
+    onReady()
+  }
+
+  function readDataFromParent() {
+    function strBool(str) {
+      return 'true' === str
+    }
+
+    var data = initMsg.substr(msgIdLen).split(':')
+
+    myID = data[0]
+    bodyMargin = undefined !== data[1] ? Number(data[1]) : bodyMargin // For V1 compatibility
+    calculateWidth = undefined !== data[2] ? strBool(data[2]) : calculateWidth
+    logging = undefined !== data[3] ? strBool(data[3]) : logging
+    interval = undefined !== data[4] ? Number(data[4]) : interval
+    autoResize = undefined !== data[6] ? strBool(data[6]) : autoResize
+    bodyMarginStr = data[7]
+    heightCalcMode = undefined !== data[8] ? data[8] : heightCalcMode
+    bodyBackground = data[9]
+    bodyPadding = data[10]
+    tolerance = undefined !== data[11] ? Number(data[11]) : tolerance
+    inPageLinks.enable = undefined !== data[12] ? strBool(data[12]) : false
+    resizeFrom = undefined !== data[13] ? data[13] : resizeFrom
+    widthCalcMode = undefined !== data[14] ? data[14] : widthCalcMode
+  }
+
+  function depricate(key) {
+    var splitName = key.split('Callback')
+
+    if (splitName.length === 2) {
+      var name =
+        'on' + splitName[0].charAt(0).toUpperCase() + splitName[0].slice(1)
+      this[name] = this[key]
+      delete this[key]
+      warn(
+        "Deprecated: '" +
+          key +
+          "' has been renamed '" +
+          name +
+          "'. The old method will be removed in the next major version."
+      )
+    }
+  }
+
+  function readDataFromPage() {
+    function readData() {
+      var data = window.iFrameResizer
+
+      log('Reading data from page: ' + JSON.stringify(data))
+      Object.keys(data).forEach(depricate, data)
+
+      onMessage = 'onMessage' in data ? data.onMessage : onMessage
+      onReady = 'onReady' in data ? data.onReady : onReady
+      targetOriginDefault =
+        'targetOrigin' in data ? data.targetOrigin : targetOriginDefault
+      heightCalcMode =
+        'heightCalculationMethod' in data
+          ? data.heightCalculationMethod
+          : heightCalcMode
+      widthCalcMode =
+        'widthCalculationMethod' in data
+          ? data.widthCalculationMethod
+          : widthCalcMode
+    }
+
+    function setupCustomCalcMethods(calcMode, calcFunc) {
+      if ('function' === typeof calcMode) {
+        log('Setup custom ' + calcFunc + 'CalcMethod')
+        customCalcMethods[calcFunc] = calcMode
+        calcMode = 'custom'
+      }
+
+      return calcMode
+    }
+
+    if (
+      'iFrameResizer' in window &&
+      Object === window.iFrameResizer.constructor
+    ) {
+      readData()
+      heightCalcMode = setupCustomCalcMethods(heightCalcMode, 'height')
+      widthCalcMode = setupCustomCalcMethods(widthCalcMode, 'width')
+    }
+
+    log('TargetOrigin for parent set to: ' + targetOriginDefault)
+  }
+
+  function chkCSS(attr, value) {
+    if (-1 !== value.indexOf('-')) {
+      warn('Negative CSS value ignored for ' + attr)
+      value = ''
+    }
+    return value
+  }
+
+  function setBodyStyle(attr, value) {
+    if (undefined !== value && '' !== value && 'null' !== value) {
+      document.body.style[attr] = value
+      log('Body ' + attr + ' set to "' + value + '"')
+    }
+  }
+
+  function setMargin() {
+    // If called via V1 script, convert bodyMargin from int to str
+    if (undefined === bodyMarginStr) {
+      bodyMarginStr = bodyMargin + 'px'
+    }
+
+    setBodyStyle('margin', chkCSS('margin', bodyMarginStr))
+  }
+
+  function stopInfiniteResizingOfIFrame() {
+    document.documentElement.style.height = ''
+    document.body.style.height = ''
+    log('HTML & body height set to "auto"')
+  }
+
+  function manageTriggerEvent(options) {
+    var listener = {
+      add: function(eventName) {
+        function handleEvent() {
+          sendSize(options.eventName, options.eventType)
+        }
+
+        eventHandlersByName[eventName] = handleEvent
+
+        addEventListener(window, eventName, handleEvent, { passive: true })
+      },
+      remove: function(eventName) {
+        var handleEvent = eventHandlersByName[eventName]
+        delete eventHandlersByName[eventName]
+
+        removeEventListener(window, eventName, handleEvent)
+      }
+    }
+
+    if (options.eventNames && Array.prototype.map) {
+      options.eventName = options.eventNames[0]
+      options.eventNames.map(listener[options.method])
+    } else {
+      listener[options.method](options.eventName)
+    }
+
+    log(
+      capitalizeFirstLetter(options.method) +
+        ' event listener: ' +
+        options.eventType
+    )
+  }
+
+  function manageEventListeners(method) {
+    manageTriggerEvent({
+      method: method,
+      eventType: 'Animation Start',
+      eventNames: ['animationstart', 'webkitAnimationStart']
+    })
+    manageTriggerEvent({
+      method: method,
+      eventType: 'Animation Iteration',
+      eventNames: ['animationiteration', 'webkitAnimationIteration']
+    })
+    manageTriggerEvent({
+      method: method,
+      eventType: 'Animation End',
+      eventNames: ['animationend', 'webkitAnimationEnd']
+    })
+    manageTriggerEvent({
+      method: method,
+      eventType: 'Input',
+      eventName: 'input'
+    })
+    manageTriggerEvent({
+      method: method,
+      eventType: 'Mouse Up',
+      eventName: 'mouseup'
+    })
+    manageTriggerEvent({
+      method: method,
+      eventType: 'Mouse Down',
+      eventName: 'mousedown'
+    })
+    manageTriggerEvent({
+      method: method,
+      eventType: 'Orientation Change',
+      eventName: 'orientationchange'
+    })
+    manageTriggerEvent({
+      method: method,
+      eventType: 'Print',
+      eventName: ['afterprint', 'beforeprint']
+    })
+    manageTriggerEvent({
+      method: method,
+      eventType: 'Ready State Change',
+      eventName: 'readystatechange'
+    })
+    manageTriggerEvent({
+      method: method,
+      eventType: 'Touch Start',
+      eventName: 'touchstart'
+    })
+    manageTriggerEvent({
+      method: method,
+      eventType: 'Touch End',
+      eventName: 'touchend'
+    })
+    manageTriggerEvent({
+      method: method,
+      eventType: 'Touch Cancel',
+      eventName: 'touchcancel'
+    })
+    manageTriggerEvent({
+      method: method,
+      eventType: 'Transition Start',
+      eventNames: [
+        'transitionstart',
+        'webkitTransitionStart',
+        'MSTransitionStart',
+        'oTransitionStart',
+        'otransitionstart'
+      ]
+    })
+    manageTriggerEvent({
+      method: method,
+      eventType: 'Transition Iteration',
+      eventNames: [
+        'transitioniteration',
+        'webkitTransitionIteration',
+        'MSTransitionIteration',
+        'oTransitionIteration',
+        'otransitioniteration'
+      ]
+    })
+    manageTriggerEvent({
+      method: method,
+      eventType: 'Transition End',
+      eventNames: [
+        'transitionend',
+        'webkitTransitionEnd',
+        'MSTransitionEnd',
+        'oTransitionEnd',
+        'otransitionend'
+      ]
+    })
+    if ('child' === resizeFrom) {
+      manageTriggerEvent({
+        method: method,
+        eventType: 'IFrame Resized',
+        eventName: 'resize'
+      })
+    }
+  }
+
+  function checkCalcMode(calcMode, calcModeDefault, modes, type) {
+    if (calcModeDefault !== calcMode) {
+      if (!(calcMode in modes)) {
+        warn(
+          calcMode + ' is not a valid option for ' + type + 'CalculationMethod.'
+        )
+        calcMode = calcModeDefault
+      }
+      log(type + ' calculation method set to "' + calcMode + '"')
+    }
+
+    return calcMode
+  }
+
+  function checkHeightMode() {
+    heightCalcMode = checkCalcMode(
+      heightCalcMode,
+      heightCalcModeDefault,
+      getHeight,
+      'height'
+    )
+  }
+
+  function checkWidthMode() {
+    widthCalcMode = checkCalcMode(
+      widthCalcMode,
+      widthCalcModeDefault,
+      getWidth,
+      'width'
+    )
+  }
+
+  function startEventListeners() {
+    if (true === autoResize) {
+      manageEventListeners('add')
+      setupMutationObserver()
+    } else {
+      log('Auto Resize disabled')
+    }
+  }
+
+  function stopMsgsToParent() {
+    log('Disable outgoing messages')
+    sendPermit = false
+  }
+
+  function removeMsgListener() {
+    log('Remove event listener: Message')
+    removeEventListener(window, 'message', receiver)
+  }
+
+  function disconnectMutationObserver() {
+    if (null !== bodyObserver) {
+      /* istanbul ignore next */ // Not testable in PhantonJS
+      bodyObserver.disconnect()
+    }
+  }
+
+  function stopEventListeners() {
+    manageEventListeners('remove')
+    disconnectMutationObserver()
+    clearInterval(intervalTimer)
+  }
+
+  function teardown() {
+    stopMsgsToParent()
+    removeMsgListener()
+    if (true === autoResize) stopEventListeners()
+  }
+
+  function injectClearFixIntoBodyElement() {
+    var clearFix = document.createElement('div')
+    clearFix.style.clear = 'both'
+    // Guard against the following having been globally redefined in CSS.
+    clearFix.style.display = 'block'
+    clearFix.style.height = '0'
+    document.body.appendChild(clearFix)
+  }
+
+  function setupInPageLinks() {
+    function getPagePosition() {
+      return {
+        x:
+          window.pageXOffset !== undefined
+            ? window.pageXOffset
+            : document.documentElement.scrollLeft,
+        y:
+          window.pageYOffset !== undefined
+            ? window.pageYOffset
+            : document.documentElement.scrollTop
+      }
+    }
+
+    function getElementPosition(el) {
+      var elPosition = el.getBoundingClientRect(),
+        pagePosition = getPagePosition()
+
+      return {
+        x: parseInt(elPosition.left, 10) + parseInt(pagePosition.x, 10),
+        y: parseInt(elPosition.top, 10) + parseInt(pagePosition.y, 10)
+      }
+    }
+
+    function findTarget(location) {
+      function jumpToTarget(target) {
+        var jumpPosition = getElementPosition(target)
+
+        log(
+          'Moving to in page link (#' +
+            hash +
+            ') at x: ' +
+            jumpPosition.x +
+            ' y: ' +
+            jumpPosition.y
+        )
+        sendMsg(jumpPosition.y, jumpPosition.x, 'scrollToOffset') // X&Y reversed at sendMsg uses height/width
+      }
+
+      var hash = location.split('#')[1] || location, // Remove # if present
+        hashData = decodeURIComponent(hash),
+        target =
+          document.getElementById(hashData) ||
+          document.getElementsByName(hashData)[0]
+
+      if (undefined !== target) {
+        jumpToTarget(target)
+      } else {
+        log(
+          'In page link (#' +
+            hash +
+            ') not found in iFrame, so sending to parent'
+        )
+        sendMsg(0, 0, 'inPageLink', '#' + hash)
+      }
+    }
+
+    function checkLocationHash() {
+      if ('' !== location.hash && '#' !== location.hash) {
+        findTarget(location.href)
+      }
+    }
+
+    function bindAnchors() {
+      function setupLink(el) {
+        function linkClicked(e) {
+          e.preventDefault()
+
+          /* jshint validthis:true */
+          findTarget(this.getAttribute('href'))
+        }
+
+        if ('#' !== el.getAttribute('href')) {
+          addEventListener(el, 'click', linkClicked)
+        }
+      }
+
+      Array.prototype.forEach.call(
+        document.querySelectorAll('a[href^="#"]'),
+        setupLink
+      )
+    }
+
+    function bindLocationHash() {
+      addEventListener(window, 'hashchange', checkLocationHash)
+    }
+
+    function initCheck() {
+      // Check if page loaded with location hash after init resize
+      setTimeout(checkLocationHash, eventCancelTimer)
+    }
+
+    function enableInPageLinks() {
+      /* istanbul ignore else */ // Not testable in phantonJS
+      if (Array.prototype.forEach && document.querySelectorAll) {
+        log('Setting up location.hash handlers')
+        bindAnchors()
+        bindLocationHash()
+        initCheck()
+      } else {
+        warn(
+          'In page linking not fully supported in this browser! (See README.md for IE8 workaround)'
+        )
+      }
+    }
+
+    if (inPageLinks.enable) {
+      enableInPageLinks()
+    } else {
+      log('In page linking not enabled')
+    }
+
+    return {
+      findTarget: findTarget
+    }
+  }
+
+  function setupPublicMethods() {
+    log('Enable public methods')
+
+    win.parentIFrame = {
+      autoResize: function autoResizeF(resize) {
+        if (true === resize && false === autoResize) {
+          autoResize = true
+          startEventListeners()
+        } else if (false === resize && true === autoResize) {
+          autoResize = false
+          stopEventListeners()
+        }
+
+        return autoResize
+      },
+
+      close: function closeF() {
+        sendMsg(0, 0, 'close')
+        teardown()
+      },
+
+      getId: function getIdF() {
+        return myID
+      },
+
+      getPageInfo: function getPageInfoF(callback) {
+        if ('function' === typeof callback) {
+          onPageInfo = callback
+          sendMsg(0, 0, 'pageInfo')
+        } else {
+          onPageInfo = function() {}
+          sendMsg(0, 0, 'pageInfoStop')
+        }
+      },
+
+      moveToAnchor: function moveToAnchorF(hash) {
+        inPageLinks.findTarget(hash)
+      },
+
+      reset: function resetF() {
+        resetIFrame('parentIFrame.reset')
+      },
+
+      scrollTo: function scrollToF(x, y) {
+        sendMsg(y, x, 'scrollTo') // X&Y reversed at sendMsg uses height/width
+      },
+
+      scrollToOffset: function scrollToF(x, y) {
+        sendMsg(y, x, 'scrollToOffset') // X&Y reversed at sendMsg uses height/width
+      },
+
+      sendMessage: function sendMessageF(msg, targetOrigin) {
+        sendMsg(0, 0, 'message', JSON.stringify(msg), targetOrigin)
+      },
+
+      setHeightCalculationMethod: function setHeightCalculationMethodF(
+        heightCalculationMethod
+      ) {
+        heightCalcMode = heightCalculationMethod
+        checkHeightMode()
+      },
+
+      setWidthCalculationMethod: function setWidthCalculationMethodF(
+        widthCalculationMethod
+      ) {
+        widthCalcMode = widthCalculationMethod
+        checkWidthMode()
+      },
+
+      setTargetOrigin: function setTargetOriginF(targetOrigin) {
+        log('Set targetOrigin: ' + targetOrigin)
+        targetOriginDefault = targetOrigin
+      },
+
+      size: function sizeF(customHeight, customWidth) {
+        var valString =
+          '' + (customHeight || '') + (customWidth ? ',' + customWidth : '')
+        sendSize(
+          'size',
+          'parentIFrame.size(' + valString + ')',
+          customHeight,
+          customWidth
+        )
+      }
+    }
+  }
+
+  function initInterval() {
+    if (0 !== interval) {
+      log('setInterval: ' + interval + 'ms')
+      intervalTimer = setInterval(function() {
+        sendSize('interval', 'setInterval: ' + interval)
+      }, Math.abs(interval))
+    }
+  }
+
+  // Not testable in PhantomJS
+  /* istanbul ignore next */
+  function setupBodyMutationObserver() {
+    function addImageLoadListners(mutation) {
+      function addImageLoadListener(element) {
+        if (false === element.complete) {
+          log('Attach listeners to ' + element.src)
+          element.addEventListener('load', imageLoaded, false)
+          element.addEventListener('error', imageError, false)
+          elements.push(element)
+        }
+      }
+
+      if (mutation.type === 'attributes' && mutation.attributeName === 'src') {
+        addImageLoadListener(mutation.target)
+      } else if (mutation.type === 'childList') {
+        Array.prototype.forEach.call(
+          mutation.target.querySelectorAll('img'),
+          addImageLoadListener
+        )
+      }
+    }
+
+    function removeFromArray(element) {
+      elements.splice(elements.indexOf(element), 1)
+    }
+
+    function removeImageLoadListener(element) {
+      log('Remove listeners from ' + element.src)
+      element.removeEventListener('load', imageLoaded, false)
+      element.removeEventListener('error', imageError, false)
+      removeFromArray(element)
+    }
+
+    function imageEventTriggered(event, type, typeDesc) {
+      removeImageLoadListener(event.target)
+      sendSize(type, typeDesc + ': ' + event.target.src, undefined, undefined)
+    }
+
+    function imageLoaded(event) {
+      imageEventTriggered(event, 'imageLoad', 'Image loaded')
+    }
+
+    function imageError(event) {
+      imageEventTriggered(event, 'imageLoadFailed', 'Image load failed')
+    }
+
+    function mutationObserved(mutations) {
+      sendSize(
+        'mutationObserver',
+        'mutationObserver: ' + mutations[0].target + ' ' + mutations[0].type
+      )
+
+      // Deal with WebKit / Blink asyncing image loading when tags are injected into the page
+      mutations.forEach(addImageLoadListners)
+    }
+
+    function createMutationObserver() {
+      var target = document.querySelector('body'),
+        config = {
+          attributes: true,
+          attributeOldValue: false,
+          characterData: true,
+          characterDataOldValue: false,
+          childList: true,
+          subtree: true
+        }
+
+      observer = new MutationObserver(mutationObserved)
+
+      log('Create body MutationObserver')
+      observer.observe(target, config)
+
+      return observer
+    }
+
+    var elements = [],
+      MutationObserver =
+        window.MutationObserver || window.WebKitMutationObserver,
+      observer = createMutationObserver()
+
+    return {
+      disconnect: function() {
+        if ('disconnect' in observer) {
+          log('Disconnect body MutationObserver')
+          observer.disconnect()
+          elements.forEach(removeImageLoadListener)
+        }
+      }
+    }
+  }
+
+  function setupMutationObserver() {
+    var forceIntervalTimer = 0 > interval
+
+    // Not testable in PhantomJS
+    /* istanbul ignore if */ if (
+      window.MutationObserver ||
+      window.WebKitMutationObserver
+    ) {
+      if (forceIntervalTimer) {
+        initInterval()
+      } else {
+        bodyObserver = setupBodyMutationObserver()
+      }
+    } else {
+      log('MutationObserver not supported in this browser!')
+      initInterval()
+    }
+  }
+
+  // document.documentElement.offsetHeight is not reliable, so
+  // we have to jump through hoops to get a better value.
+  function getComputedStyle(prop, el) {
+    var retVal = 0
+    el = el || document.body // Not testable in phantonJS
+
+    retVal = document.defaultView.getComputedStyle(el, null)
+    retVal = null !== retVal ? retVal[prop] : 0
+
+    return parseInt(retVal, base)
+  }
+
+  function chkEventThottle(timer) {
+    if (timer > throttledTimer / 2) {
+      throttledTimer = 2 * timer
+      log('Event throttle increased to ' + throttledTimer + 'ms')
+    }
+  }
+
+  // Idea from https://github.com/guardian/iframe-messenger
+  function getMaxElement(side, elements) {
+    var elementsLength = elements.length,
+      elVal = 0,
+      maxVal = 0,
+      Side = capitalizeFirstLetter(side),
+      timer = getNow()
+
+    for (var i = 0; i < elementsLength; i++) {
+      elVal =
+        elements[i].getBoundingClientRect()[side] +
+        getComputedStyle('margin' + Side, elements[i])
+      if (elVal > maxVal) {
+        maxVal = elVal
+      }
+    }
+
+    timer = getNow() - timer
+
+    log('Parsed ' + elementsLength + ' HTML elements')
+    log('Element position calculated in ' + timer + 'ms')
+
+    chkEventThottle(timer)
+
+    return maxVal
+  }
+
+  function getAllMeasurements(dimention) {
+    return [
+      dimention.bodyOffset(),
+      dimention.bodyScroll(),
+      dimention.documentElementOffset(),
+      dimention.documentElementScroll()
+    ]
+  }
+
+  function getTaggedElements(side, tag) {
+    function noTaggedElementsFound() {
+      warn('No tagged elements (' + tag + ') found on page')
+      return document.querySelectorAll('body *')
+    }
+
+    var elements = document.querySelectorAll('[' + tag + ']')
+
+    if (0 === elements.length) noTaggedElementsFound()
+
+    return getMaxElement(side, elements)
+  }
+
+  function getAllElements() {
+    return document.querySelectorAll('body *')
+  }
+
+  var getHeight = {
+      bodyOffset: function getBodyOffsetHeight() {
+        return (
+          document.body.offsetHeight +
+          getComputedStyle('marginTop') +
+          getComputedStyle('marginBottom')
+        )
+      },
+
+      offset: function() {
+        return getHeight.bodyOffset() // Backwards compatability
+      },
+
+      bodyScroll: function getBodyScrollHeight() {
+        return document.body.scrollHeight
+      },
+
+      custom: function getCustomWidth() {
+        return customCalcMethods.height()
+      },
+
+      documentElementOffset: function getDEOffsetHeight() {
+        return document.documentElement.offsetHeight
+      },
+
+      documentElementScroll: function getDEScrollHeight() {
+        return document.documentElement.scrollHeight
+      },
+
+      max: function getMaxHeight() {
+        return Math.max.apply(null, getAllMeasurements(getHeight))
+      },
+
+      min: function getMinHeight() {
+        return Math.min.apply(null, getAllMeasurements(getHeight))
+      },
+
+      grow: function growHeight() {
+        return getHeight.max() // Run max without the forced downsizing
+      },
+
+      lowestElement: function getBestHeight() {
+        return Math.max(
+          getHeight.bodyOffset() || getHeight.documentElementOffset(),
+          getMaxElement('bottom', getAllElements())
+        )
+      },
+
+      taggedElement: function getTaggedElementsHeight() {
+        return getTaggedElements('bottom', 'data-iframe-height')
+      }
+    },
+    getWidth = {
+      bodyScroll: function getBodyScrollWidth() {
+        return document.body.scrollWidth
+      },
+
+      bodyOffset: function getBodyOffsetWidth() {
+        return document.body.offsetWidth
+      },
+
+      custom: function getCustomWidth() {
+        return customCalcMethods.width()
+      },
+
+      documentElementScroll: function getDEScrollWidth() {
+        return document.documentElement.scrollWidth
+      },
+
+      documentElementOffset: function getDEOffsetWidth() {
+        return document.documentElement.offsetWidth
+      },
+
+      scroll: function getMaxWidth() {
+        return Math.max(getWidth.bodyScroll(), getWidth.documentElementScroll())
+      },
+
+      max: function getMaxWidth() {
+        return Math.max.apply(null, getAllMeasurements(getWidth))
+      },
+
+      min: function getMinWidth() {
+        return Math.min.apply(null, getAllMeasurements(getWidth))
+      },
+
+      rightMostElement: function rightMostElement() {
+        return getMaxElement('right', getAllElements())
+      },
+
+      taggedElement: function getTaggedElementsWidth() {
+        return getTaggedElements('right', 'data-iframe-width')
+      }
+    }
+
+  function sizeIFrame(
+    triggerEvent,
+    triggerEventDesc,
+    customHeight,
+    customWidth
+  ) {
+    function resizeIFrame() {
+      height = currentHeight
+      width = currentWidth
+
+      sendMsg(height, width, triggerEvent)
+    }
+
+    function isSizeChangeDetected() {
+      function checkTolarance(a, b) {
+        var retVal = Math.abs(a - b) <= tolerance
+        return !retVal
+      }
+
+      currentHeight =
+        undefined !== customHeight ? customHeight : getHeight[heightCalcMode]()
+      currentWidth =
+        undefined !== customWidth ? customWidth : getWidth[widthCalcMode]()
+
+      return (
+        checkTolarance(height, currentHeight) ||
+        (calculateWidth && checkTolarance(width, currentWidth))
+      )
+    }
+
+    function isForceResizableEvent() {
+      return !(triggerEvent in { init: 1, interval: 1, size: 1 })
+    }
+
+    function isForceResizableCalcMode() {
+      return (
+        heightCalcMode in resetRequiredMethods ||
+        (calculateWidth && widthCalcMode in resetRequiredMethods)
+      )
+    }
+
+    function logIgnored() {
+      log('No change in size detected')
+    }
+
+    function checkDownSizing() {
+      if (isForceResizableEvent() && isForceResizableCalcMode()) {
+        resetIFrame(triggerEventDesc)
+      } else if (!(triggerEvent in { interval: 1 })) {
+        logIgnored()
+      }
+    }
+
+    var currentHeight, currentWidth
+
+    if (isSizeChangeDetected() || 'init' === triggerEvent) {
+      lockTrigger()
+      resizeIFrame()
+    } else {
+      checkDownSizing()
+    }
+  }
+
+  var sizeIFrameThrottled = throttle(sizeIFrame)
+
+  function sendSize(triggerEvent, triggerEventDesc, customHeight, customWidth) {
+    function recordTrigger() {
+      if (!(triggerEvent in { reset: 1, resetPage: 1, init: 1 })) {
+        log('Trigger event: ' + triggerEventDesc)
+      }
+    }
+
+    function isDoubleFiredEvent() {
+      return triggerLocked && triggerEvent in doubleEventList
+    }
+
+    if (!isDoubleFiredEvent()) {
+      recordTrigger()
+      if (triggerEvent === 'init') {
+        sizeIFrame(triggerEvent, triggerEventDesc, customHeight, customWidth)
+      } else {
+        sizeIFrameThrottled(
+          triggerEvent,
+          triggerEventDesc,
+          customHeight,
+          customWidth
+        )
+      }
+    } else {
+      log('Trigger event cancelled: ' + triggerEvent)
+    }
+  }
+
+  function lockTrigger() {
+    if (!triggerLocked) {
+      triggerLocked = true
+      log('Trigger event lock on')
+    }
+    clearTimeout(triggerLockedTimer)
+    triggerLockedTimer = setTimeout(function() {
+      triggerLocked = false
+      log('Trigger event lock off')
+      log('--')
+    }, eventCancelTimer)
+  }
+
+  function triggerReset(triggerEvent) {
+    height = getHeight[heightCalcMode]()
+    width = getWidth[widthCalcMode]()
+
+    sendMsg(height, width, triggerEvent)
+  }
+
+  function resetIFrame(triggerEventDesc) {
+    var hcm = heightCalcMode
+    heightCalcMode = heightCalcModeDefault
+
+    log('Reset trigger event: ' + triggerEventDesc)
+    lockTrigger()
+    triggerReset('reset')
+
+    heightCalcMode = hcm
+  }
+
+  function sendMsg(height, width, triggerEvent, msg, targetOrigin) {
+    function setTargetOrigin() {
+      if (undefined === targetOrigin) {
+        targetOrigin = targetOriginDefault
+      } else {
+        log('Message targetOrigin: ' + targetOrigin)
+      }
+    }
+
+    function sendToParent() {
+      var size = height + ':' + width,
+        message =
+          myID +
+          ':' +
+          size +
+          ':' +
+          triggerEvent +
+          (undefined !== msg ? ':' + msg : '')
+
+      log('Sending message to host page (' + message + ')')
+      target.postMessage(msgID + message, targetOrigin)
+    }
+
+    if (true === sendPermit) {
+      setTargetOrigin()
+      sendToParent()
+    }
+  }
+
+  function receiver(event) {
+    var processRequestFromParent = {
+      init: function initFromParent() {
+        initMsg = event.data
+        target = event.source
+
+        init()
+        firstRun = false
+        setTimeout(function() {
+          initLock = false
+        }, eventCancelTimer)
+      },
+
+      reset: function resetFromParent() {
+        if (!initLock) {
+          log('Page size reset by host page')
+          triggerReset('resetPage')
+        } else {
+          log('Page reset ignored by init')
+        }
+      },
+
+      resize: function resizeFromParent() {
+        sendSize('resizeParent', 'Parent window requested size check')
+      },
+
+      moveToAnchor: function moveToAnchorF() {
+        inPageLinks.findTarget(getData())
+      },
+      inPageLink: function inPageLinkF() {
+        this.moveToAnchor()
+      }, // Backward compatability
+
+      pageInfo: function pageInfoFromParent() {
+        var msgBody = getData()
+        log('PageInfoFromParent called from parent: ' + msgBody)
+        onPageInfo(JSON.parse(msgBody))
+        log(' --')
+      },
+
+      message: function messageFromParent() {
+        var msgBody = getData()
+
+        log('onMessage called from parent: ' + msgBody)
+        // eslint-disable-next-line sonarjs/no-extra-arguments
+        onMessage(JSON.parse(msgBody))
+        log(' --')
+      }
+    }
+
+    function isMessageForUs() {
+      return msgID === ('' + event.data).substr(0, msgIdLen) // ''+ Protects against non-string messages
+    }
+
+    function getMessageType() {
+      return event.data.split(']')[1].split(':')[0]
+    }
+
+    function getData() {
+      return event.data.substr(event.data.indexOf(':') + 1)
+    }
+
+    function isMiddleTier() {
+      return (
+        (!( true && module.exports) &&
+          'iFrameResize' in window) ||
+        ('jQuery' in window && 'iFrameResize' in window.jQuery.prototype)
+      )
+    }
+
+    function isInitMsg() {
+      // Test if this message is from a child below us. This is an ugly test, however, updating
+      // the message format would break backwards compatibity.
+      return event.data.split(':')[2] in { true: 1, false: 1 }
+    }
+
+    function callFromParent() {
+      var messageType = getMessageType()
+
+      if (messageType in processRequestFromParent) {
+        processRequestFromParent[messageType]()
+      } else if (!isMiddleTier() && !isInitMsg()) {
+        warn('Unexpected message (' + event.data + ')')
+      }
+    }
+
+    function processMessage() {
+      if (false === firstRun) {
+        callFromParent()
+      } else if (isInitMsg()) {
+        processRequestFromParent.init()
+      } else {
+        log(
+          'Ignored message of type "' +
+            getMessageType() +
+            '". Received before initialization.'
+        )
+      }
+    }
+
+    if (isMessageForUs()) {
+      processMessage()
+    }
+  }
+
+  // Normally the parent kicks things off when it detects the iFrame has loaded.
+  // If this script is async-loaded, then tell parent page to retry init.
+  function chkLateLoaded() {
+    if ('loading' !== document.readyState) {
+      window.parent.postMessage('[iFrameResizerChild]Ready', '*')
+    }
+  }
+
+  addEventListener(window, 'message', receiver)
+  addEventListener(window, 'readystatechange', chkLateLoaded)
+  chkLateLoaded()
+
+  
+})()
+
+
+/***/ }),
+
+/***/ "./node_modules/iframe-resizer/js/iframeResizer.js":
+/*!*********************************************************!*\
+  !*** ./node_modules/iframe-resizer/js/iframeResizer.js ***!
+  \*********************************************************/
+/*! no static exports found */
+/***/ (function(module, exports, __webpack_require__) {
+
+var __WEBPACK_AMD_DEFINE_FACTORY__, __WEBPACK_AMD_DEFINE_ARRAY__, __WEBPACK_AMD_DEFINE_RESULT__;/*
+ * File: iframeResizer.js
+ * Desc: Force iframes to size to content.
+ * Requires: iframeResizer.contentWindow.js to be loaded into the target frame.
+ * Doc: https://github.com/davidjbradshaw/iframe-resizer
+ * Author: David J. Bradshaw - dave@bradshaw.net
+ * Contributor: Jure Mav - jure.mav@gmail.com
+ * Contributor: Reed Dadoune - reed@dadoune.com
+ */
+
+// eslint-disable-next-line sonarjs/cognitive-complexity, no-shadow-restricted-names
+;(function(undefined) {
+  if (typeof window === 'undefined') return // don't run for server side render
+
+  var count = 0,
+    logEnabled = false,
+    hiddenCheckEnabled = false,
+    msgHeader = 'message',
+    msgHeaderLen = msgHeader.length,
+    msgId = '[iFrameSizer]', // Must match iframe msg ID
+    msgIdLen = msgId.length,
+    pagePosition = null,
+    requestAnimationFrame = window.requestAnimationFrame,
+    resetRequiredMethods = {
+      max: 1,
+      scroll: 1,
+      bodyScroll: 1,
+      documentElementScroll: 1
+    },
+    settings = {},
+    timer = null,
+    defaults = {
+      autoResize: true,
+      bodyBackground: null,
+      bodyMargin: null,
+      bodyMarginV1: 8,
+      bodyPadding: null,
+      checkOrigin: true,
+      inPageLinks: false,
+      enablePublicMethods: true,
+      heightCalculationMethod: 'bodyOffset',
+      id: 'iFrameResizer',
+      interval: 32,
+      log: false,
+      maxHeight: Infinity,
+      maxWidth: Infinity,
+      minHeight: 0,
+      minWidth: 0,
+      resizeFrom: 'parent',
+      scrolling: false,
+      sizeHeight: true,
+      sizeWidth: false,
+      warningTimeout: 5000,
+      tolerance: 0,
+      widthCalculationMethod: 'scroll',
+      onClosed: function() {},
+      onInit: function() {},
+      onMessage: function() {
+        warn('onMessage function not defined')
+      },
+      onResized: function() {},
+      onScroll: function() {
+        return true
+      }
+    }
+
+  function getMutationObserver() {
+    return (
+      window.MutationObserver ||
+      window.WebKitMutationObserver ||
+      window.MozMutationObserver
+    )
+  }
+
+  function addEventListener(el, evt, func) {
+    el.addEventListener(evt, func, false)
+  }
+
+  function removeEventListener(el, evt, func) {
+    el.removeEventListener(evt, func, false)
+  }
+
+  function setupRequestAnimationFrame() {
+    var vendors = ['moz', 'webkit', 'o', 'ms']
+    var x
+
+    // Remove vendor prefixing if prefixed and break early if not
+    for (x = 0; x < vendors.length && !requestAnimationFrame; x += 1) {
+      requestAnimationFrame = window[vendors[x] + 'RequestAnimationFrame']
+    }
+
+    if (!requestAnimationFrame) {
+      log('setup', 'RequestAnimationFrame not supported')
+    }
+  }
+
+  function getMyID(iframeId) {
+    var retStr = 'Host page: ' + iframeId
+
+    if (window.top !== window.self) {
+      if (window.parentIFrame && window.parentIFrame.getId) {
+        retStr = window.parentIFrame.getId() + ': ' + iframeId
+      } else {
+        retStr = 'Nested host page: ' + iframeId
+      }
+    }
+
+    return retStr
+  }
+
+  function formatLogHeader(iframeId) {
+    return msgId + '[' + getMyID(iframeId) + ']'
+  }
+
+  function isLogEnabled(iframeId) {
+    return settings[iframeId] ? settings[iframeId].log : logEnabled
+  }
+
+  function log(iframeId, msg) {
+    output('log', iframeId, msg, isLogEnabled(iframeId))
+  }
+
+  function info(iframeId, msg) {
+    output('info', iframeId, msg, isLogEnabled(iframeId))
+  }
+
+  function warn(iframeId, msg) {
+    output('warn', iframeId, msg, true)
+  }
+
+  function output(type, iframeId, msg, enabled) {
+    if (true === enabled && 'object' === typeof window.console) {
+      // eslint-disable-next-line no-console
+      console[type](formatLogHeader(iframeId), msg)
+    }
+  }
+
+  function iFrameListener(event) {
+    function resizeIFrame() {
+      function resize() {
+        setSize(messageData)
+        setPagePosition(iframeId)
+        on('onResized', messageData)
+      }
+
+      ensureInRange('Height')
+      ensureInRange('Width')
+
+      syncResize(resize, messageData, 'init')
+    }
+
+    function processMsg() {
+      var data = msg.substr(msgIdLen).split(':')
+
+      return {
+        iframe: settings[data[0]] && settings[data[0]].iframe,
+        id: data[0],
+        height: data[1],
+        width: data[2],
+        type: data[3]
+      }
+    }
+
+    function ensureInRange(Dimension) {
+      var max = Number(settings[iframeId]['max' + Dimension]),
+        min = Number(settings[iframeId]['min' + Dimension]),
+        dimension = Dimension.toLowerCase(),
+        size = Number(messageData[dimension])
+
+      log(iframeId, 'Checking ' + dimension + ' is in range ' + min + '-' + max)
+
+      if (size < min) {
+        size = min
+        log(iframeId, 'Set ' + dimension + ' to min value')
+      }
+
+      if (size > max) {
+        size = max
+        log(iframeId, 'Set ' + dimension + ' to max value')
+      }
+
+      messageData[dimension] = '' + size
+    }
+
+    function isMessageFromIFrame() {
+      function checkAllowedOrigin() {
+        function checkList() {
+          var i = 0,
+            retCode = false
+
+          log(
+            iframeId,
+            'Checking connection is from allowed list of origins: ' +
+              checkOrigin
+          )
+
+          for (; i < checkOrigin.length; i++) {
+            if (checkOrigin[i] === origin) {
+              retCode = true
+              break
+            }
+          }
+          return retCode
+        }
+
+        function checkSingle() {
+          var remoteHost = settings[iframeId] && settings[iframeId].remoteHost
+          log(iframeId, 'Checking connection is from: ' + remoteHost)
+          return origin === remoteHost
+        }
+
+        return checkOrigin.constructor === Array ? checkList() : checkSingle()
+      }
+
+      var origin = event.origin,
+        checkOrigin = settings[iframeId] && settings[iframeId].checkOrigin
+
+      if (checkOrigin && '' + origin !== 'null' && !checkAllowedOrigin()) {
+        throw new Error(
+          'Unexpected message received from: ' +
+            origin +
+            ' for ' +
+            messageData.iframe.id +
+            '. Message was: ' +
+            event.data +
+            '. This error can be disabled by setting the checkOrigin: false option or by providing of array of trusted domains.'
+        )
+      }
+
+      return true
+    }
+
+    function isMessageForUs() {
+      return (
+        msgId === ('' + msg).substr(0, msgIdLen) &&
+        msg.substr(msgIdLen).split(':')[0] in settings
+      ) // ''+Protects against non-string msg
+    }
+
+    function isMessageFromMetaParent() {
+      // Test if this message is from a parent above us. This is an ugly test, however, updating
+      // the message format would break backwards compatibity.
+      var retCode = messageData.type in { true: 1, false: 1, undefined: 1 }
+
+      if (retCode) {
+        log(iframeId, 'Ignoring init message from meta parent page')
+      }
+
+      return retCode
+    }
+
+    function getMsgBody(offset) {
+      return msg.substr(msg.indexOf(':') + msgHeaderLen + offset)
+    }
+
+    function forwardMsgFromIFrame(msgBody) {
+      log(
+        iframeId,
+        'onMessage passed: {iframe: ' +
+          messageData.iframe.id +
+          ', message: ' +
+          msgBody +
+          '}'
+      )
+      on('onMessage', {
+        iframe: messageData.iframe,
+        message: JSON.parse(msgBody)
+      })
+      log(iframeId, '--')
+    }
+
+    function getPageInfo() {
+      var bodyPosition = document.body.getBoundingClientRect(),
+        iFramePosition = messageData.iframe.getBoundingClientRect()
+
+      return JSON.stringify({
+        iframeHeight: iFramePosition.height,
+        iframeWidth: iFramePosition.width,
+        clientHeight: Math.max(
+          document.documentElement.clientHeight,
+          window.innerHeight || 0
+        ),
+        clientWidth: Math.max(
+          document.documentElement.clientWidth,
+          window.innerWidth || 0
+        ),
+        offsetTop: parseInt(iFramePosition.top - bodyPosition.top, 10),
+        offsetLeft: parseInt(iFramePosition.left - bodyPosition.left, 10),
+        scrollTop: window.pageYOffset,
+        scrollLeft: window.pageXOffset,
+        documentHeight: document.documentElement.clientHeight,
+        documentWidth: document.documentElement.clientWidth,
+        windowHeight: window.innerHeight,
+        windowWidth: window.innerWidth
+      })
+    }
+
+    function sendPageInfoToIframe(iframe, iframeId) {
+      function debouncedTrigger() {
+        trigger('Send Page Info', 'pageInfo:' + getPageInfo(), iframe, iframeId)
+      }
+      debounceFrameEvents(debouncedTrigger, 32, iframeId)
+    }
+
+    function startPageInfoMonitor() {
+      function setListener(type, func) {
+        function sendPageInfo() {
+          if (settings[id]) {
+            sendPageInfoToIframe(settings[id].iframe, id)
+          } else {
+            stop()
+          }
+        }
+
+        ;['scroll', 'resize'].forEach(function(evt) {
+          log(id, type + evt + ' listener for sendPageInfo')
+          func(window, evt, sendPageInfo)
+        })
+      }
+
+      function stop() {
+        setListener('Remove ', removeEventListener)
+      }
+
+      function start() {
+        setListener('Add ', addEventListener)
+      }
+
+      var id = iframeId // Create locally scoped copy of iFrame ID
+
+      start()
+
+      if (settings[id]) {
+        settings[id].stopPageInfo = stop
+      }
+    }
+
+    function stopPageInfoMonitor() {
+      if (settings[iframeId] && settings[iframeId].stopPageInfo) {
+        settings[iframeId].stopPageInfo()
+        delete settings[iframeId].stopPageInfo
+      }
+    }
+
+    function checkIFrameExists() {
+      var retBool = true
+
+      if (null === messageData.iframe) {
+        warn(iframeId, 'IFrame (' + messageData.id + ') not found')
+        retBool = false
+      }
+      return retBool
+    }
+
+    function getElementPosition(target) {
+      var iFramePosition = target.getBoundingClientRect()
+
+      getPagePosition(iframeId)
+
+      return {
+        x: Math.floor(Number(iFramePosition.left) + Number(pagePosition.x)),
+        y: Math.floor(Number(iFramePosition.top) + Number(pagePosition.y))
+      }
+    }
+
+    function scrollRequestFromChild(addOffset) {
+      /* istanbul ignore next */ // Not testable in Karma
+      function reposition() {
+        pagePosition = newPosition
+        scrollTo()
+        log(iframeId, '--')
+      }
+
+      function calcOffset() {
+        return {
+          x: Number(messageData.width) + offset.x,
+          y: Number(messageData.height) + offset.y
+        }
+      }
+
+      function scrollParent() {
+        if (window.parentIFrame) {
+          window.parentIFrame['scrollTo' + (addOffset ? 'Offset' : '')](
+            newPosition.x,
+            newPosition.y
+          )
+        } else {
+          warn(
+            iframeId,
+            'Unable to scroll to requested position, window.parentIFrame not found'
+          )
+        }
+      }
+
+      var offset = addOffset
+          ? getElementPosition(messageData.iframe)
+          : { x: 0, y: 0 },
+        newPosition = calcOffset()
+
+      log(
+        iframeId,
+        'Reposition requested from iFrame (offset x:' +
+          offset.x +
+          ' y:' +
+          offset.y +
+          ')'
+      )
+
+      if (window.top !== window.self) {
+        scrollParent()
+      } else {
+        reposition()
+      }
+    }
+
+    function scrollTo() {
+      if (false !== on('onScroll', pagePosition)) {
+        setPagePosition(iframeId)
+      } else {
+        unsetPagePosition()
+      }
+    }
+
+    function findTarget(location) {
+      function jumpToTarget() {
+        var jumpPosition = getElementPosition(target)
+
+        log(
+          iframeId,
+          'Moving to in page link (#' +
+            hash +
+            ') at x: ' +
+            jumpPosition.x +
+            ' y: ' +
+            jumpPosition.y
+        )
+        pagePosition = {
+          x: jumpPosition.x,
+          y: jumpPosition.y
+        }
+
+        scrollTo()
+        log(iframeId, '--')
+      }
+
+      function jumpToParent() {
+        if (window.parentIFrame) {
+          window.parentIFrame.moveToAnchor(hash)
+        } else {
+          log(
+            iframeId,
+            'In page link #' +
+              hash +
+              ' not found and window.parentIFrame not found'
+          )
+        }
+      }
+
+      var hash = location.split('#')[1] || '',
+        hashData = decodeURIComponent(hash),
+        target =
+          document.getElementById(hashData) ||
+          document.getElementsByName(hashData)[0]
+
+      if (target) {
+        jumpToTarget()
+      } else if (window.top !== window.self) {
+        jumpToParent()
+      } else {
+        log(iframeId, 'In page link #' + hash + ' not found')
+      }
+    }
+
+    function on(funcName, val) {
+      return chkEvent(iframeId, funcName, val)
+    }
+
+    function actionMsg() {
+      if (settings[iframeId] && settings[iframeId].firstRun) firstRun()
+
+      switch (messageData.type) {
+        case 'close':
+          if (settings[iframeId].closeRequeston)
+            chkEvent(iframeId, 'onCloseRequest', settings[iframeId].iframe)
+          else closeIFrame(messageData.iframe)
+          break
+
+        case 'message':
+          forwardMsgFromIFrame(getMsgBody(6))
+          break
+
+        case 'scrollTo':
+          scrollRequestFromChild(false)
+          break
+
+        case 'scrollToOffset':
+          scrollRequestFromChild(true)
+          break
+
+        case 'pageInfo':
+          sendPageInfoToIframe(
+            settings[iframeId] && settings[iframeId].iframe,
+            iframeId
+          )
+          startPageInfoMonitor()
+          break
+
+        case 'pageInfoStop':
+          stopPageInfoMonitor()
+          break
+
+        case 'inPageLink':
+          findTarget(getMsgBody(9))
+          break
+
+        case 'reset':
+          resetIFrame(messageData)
+          break
+
+        case 'init':
+          resizeIFrame()
+          on('onInit', messageData.iframe)
+          break
+
+        default:
+          resizeIFrame()
+      }
+    }
+
+    function hasSettings(iframeId) {
+      var retBool = true
+
+      if (!settings[iframeId]) {
+        retBool = false
+        warn(
+          messageData.type +
+            ' No settings for ' +
+            iframeId +
+            '. Message was: ' +
+            msg
+        )
+      }
+
+      return retBool
+    }
+
+    function iFrameReadyMsgReceived() {
+      // eslint-disable-next-line no-restricted-syntax, guard-for-in
+      for (var iframeId in settings) {
+        trigger(
+          'iFrame requested init',
+          createOutgoingMsg(iframeId),
+          document.getElementById(iframeId),
+          iframeId
+        )
+      }
+    }
+
+    function firstRun() {
+      if (settings[iframeId]) {
+        settings[iframeId].firstRun = false
+      }
+    }
+
+    var msg = event.data,
+      messageData = {},
+      iframeId = null
+
+    if ('[iFrameResizerChild]Ready' === msg) {
+      iFrameReadyMsgReceived()
+    } else if (isMessageForUs()) {
+      messageData = processMsg()
+      iframeId = messageData.id
+      if (settings[iframeId]) {
+        settings[iframeId].loaded = true
+      }
+
+      if (!isMessageFromMetaParent() && hasSettings(iframeId)) {
+        log(iframeId, 'Received: ' + msg)
+
+        if (checkIFrameExists() && isMessageFromIFrame()) {
+          actionMsg()
+        }
+      }
+    } else {
+      info(iframeId, 'Ignored: ' + msg)
+    }
+  }
+
+  function chkEvent(iframeId, funcName, val) {
+    var func = null,
+      retVal = null
+
+    if (settings[iframeId]) {
+      func = settings[iframeId][funcName]
+
+      if ('function' === typeof func) {
+        retVal = func(val)
+      } else {
+        throw new TypeError(
+          funcName + ' on iFrame[' + iframeId + '] is not a function'
+        )
+      }
+    }
+
+    return retVal
+  }
+
+  function removeIframeListeners(iframe) {
+    var iframeId = iframe.id
+    delete settings[iframeId]
+  }
+
+  function closeIFrame(iframe) {
+    var iframeId = iframe.id
+    log(iframeId, 'Removing iFrame: ' + iframeId)
+
+    try {
+      // Catch race condition error with React
+      if (iframe.parentNode) {
+        iframe.parentNode.removeChild(iframe)
+      }
+    } catch (error) {
+      warn(error)
+    }
+
+    chkEvent(iframeId, 'onClosed', iframeId)
+    log(iframeId, '--')
+    removeIframeListeners(iframe)
+  }
+
+  function getPagePosition(iframeId) {
+    if (null === pagePosition) {
+      pagePosition = {
+        x:
+          window.pageXOffset !== undefined
+            ? window.pageXOffset
+            : document.documentElement.scrollLeft,
+        y:
+          window.pageYOffset !== undefined
+            ? window.pageYOffset
+            : document.documentElement.scrollTop
+      }
+      log(
+        iframeId,
+        'Get page position: ' + pagePosition.x + ',' + pagePosition.y
+      )
+    }
+  }
+
+  function setPagePosition(iframeId) {
+    if (null !== pagePosition) {
+      window.scrollTo(pagePosition.x, pagePosition.y)
+      log(
+        iframeId,
+        'Set page position: ' + pagePosition.x + ',' + pagePosition.y
+      )
+      unsetPagePosition()
+    }
+  }
+
+  function unsetPagePosition() {
+    pagePosition = null
+  }
+
+  function resetIFrame(messageData) {
+    function reset() {
+      setSize(messageData)
+      trigger('reset', 'reset', messageData.iframe, messageData.id)
+    }
+
+    log(
+      messageData.id,
+      'Size reset requested by ' +
+        ('init' === messageData.type ? 'host page' : 'iFrame')
+    )
+    getPagePosition(messageData.id)
+    syncResize(reset, messageData, 'reset')
+  }
+
+  function setSize(messageData) {
+    function setDimension(dimension) {
+      if (!messageData.id) {
+        log('undefined', 'messageData id not set')
+        return
+      }
+      messageData.iframe.style[dimension] = messageData[dimension] + 'px'
+      log(
+        messageData.id,
+        'IFrame (' +
+          iframeId +
+          ') ' +
+          dimension +
+          ' set to ' +
+          messageData[dimension] +
+          'px'
+      )
+    }
+
+    function chkZero(dimension) {
+      // FireFox sets dimension of hidden iFrames to zero.
+      // So if we detect that set up an event to check for
+      // when iFrame becomes visible.
+
+      /* istanbul ignore next */ // Not testable in PhantomJS
+      if (!hiddenCheckEnabled && '0' === messageData[dimension]) {
+        hiddenCheckEnabled = true
+        log(iframeId, 'Hidden iFrame detected, creating visibility listener')
+        fixHiddenIFrames()
+      }
+    }
+
+    function processDimension(dimension) {
+      setDimension(dimension)
+      chkZero(dimension)
+    }
+
+    var iframeId = messageData.iframe.id
+
+    if (settings[iframeId]) {
+      if (settings[iframeId].sizeHeight) {
+        processDimension('height')
+      }
+      if (settings[iframeId].sizeWidth) {
+        processDimension('width')
+      }
+    }
+  }
+
+  function syncResize(func, messageData, doNotSync) {
+    /* istanbul ignore if */ // Not testable in PhantomJS
+    if (doNotSync !== messageData.type && requestAnimationFrame) {
+      log(messageData.id, 'Requesting animation frame')
+      requestAnimationFrame(func)
+    } else {
+      func()
+    }
+  }
+
+  function trigger(calleeMsg, msg, iframe, id, noResponseWarning) {
+    function postMessageToIFrame() {
+      var target = settings[id] && settings[id].targetOrigin
+      log(
+        id,
+        '[' +
+          calleeMsg +
+          '] Sending msg to iframe[' +
+          id +
+          '] (' +
+          msg +
+          ') targetOrigin: ' +
+          target
+      )
+      iframe.contentWindow.postMessage(msgId + msg, target)
+    }
+
+    function iFrameNotFound() {
+      warn(id, '[' + calleeMsg + '] IFrame(' + id + ') not found')
+    }
+
+    function chkAndSend() {
+      if (
+        iframe &&
+        'contentWindow' in iframe &&
+        null !== iframe.contentWindow
+      ) {
+        // Null test for PhantomJS
+        postMessageToIFrame()
+      } else {
+        iFrameNotFound()
+      }
+    }
+
+    function warnOnNoResponse() {
+      function warning() {
+        if (settings[id] && !settings[id].loaded && !errorShown) {
+          errorShown = true
+          warn(
+            id,
+            'IFrame has not responded within ' +
+              settings[id].warningTimeout / 1000 +
+              ' seconds. Check iFrameResizer.contentWindow.js has been loaded in iFrame. This message can be ignored if everything is working, or you can set the warningTimeout option to a higher value or zero to suppress this warning.'
+          )
+        }
+      }
+
+      if (
+        !!noResponseWarning &&
+        settings[id] &&
+        !!settings[id].warningTimeout
+      ) {
+        settings[id].msgTimeout = setTimeout(
+          warning,
+          settings[id].warningTimeout
+        )
+      }
+    }
+
+    var errorShown = false
+
+    id = id || iframe.id
+
+    if (settings[id]) {
+      chkAndSend()
+      warnOnNoResponse()
+    }
+  }
+
+  function createOutgoingMsg(iframeId) {
+    return (
+      iframeId +
+      ':' +
+      settings[iframeId].bodyMarginV1 +
+      ':' +
+      settings[iframeId].sizeWidth +
+      ':' +
+      settings[iframeId].log +
+      ':' +
+      settings[iframeId].interval +
+      ':' +
+      settings[iframeId].enablePublicMethods +
+      ':' +
+      settings[iframeId].autoResize +
+      ':' +
+      settings[iframeId].bodyMargin +
+      ':' +
+      settings[iframeId].heightCalculationMethod +
+      ':' +
+      settings[iframeId].bodyBackground +
+      ':' +
+      settings[iframeId].bodyPadding +
+      ':' +
+      settings[iframeId].tolerance +
+      ':' +
+      settings[iframeId].inPageLinks +
+      ':' +
+      settings[iframeId].resizeFrom +
+      ':' +
+      settings[iframeId].widthCalculationMethod
+    )
+  }
+
+  function setupIFrame(iframe, options) {
+    function setLimits() {
+      function addStyle(style) {
+        if (
+          Infinity !== settings[iframeId][style] &&
+          0 !== settings[iframeId][style]
+        ) {
+          iframe.style[style] = settings[iframeId][style] + 'px'
+          log(
+            iframeId,
+            'Set ' + style + ' = ' + settings[iframeId][style] + 'px'
+          )
+        }
+      }
+
+      function chkMinMax(dimension) {
+        if (
+          settings[iframeId]['min' + dimension] >
+          settings[iframeId]['max' + dimension]
+        ) {
+          throw new Error(
+            'Value for min' +
+              dimension +
+              ' can not be greater than max' +
+              dimension
+          )
+        }
+      }
+
+      chkMinMax('Height')
+      chkMinMax('Width')
+
+      addStyle('maxHeight')
+      addStyle('minHeight')
+      addStyle('maxWidth')
+      addStyle('minWidth')
+    }
+
+    function newId() {
+      var id = (options && options.id) || defaults.id + count++
+      if (null !== document.getElementById(id)) {
+        id += count++
+      }
+      return id
+    }
+
+    function ensureHasId(iframeId) {
+      if ('' === iframeId) {
+        // eslint-disable-next-line no-multi-assign
+        iframe.id = iframeId = newId()
+        logEnabled = (options || {}).log
+        log(
+          iframeId,
+          'Added missing iframe ID: ' + iframeId + ' (' + iframe.src + ')'
+        )
+      }
+
+      return iframeId
+    }
+
+    function setScrolling() {
+      log(
+        iframeId,
+        'IFrame scrolling ' +
+          (settings[iframeId] && settings[iframeId].scrolling
+            ? 'enabled'
+            : 'disabled') +
+          ' for ' +
+          iframeId
+      )
+      iframe.style.overflow =
+        false === (settings[iframeId] && settings[iframeId].scrolling)
+          ? 'hidden'
+          : 'auto'
+      switch (settings[iframeId] && settings[iframeId].scrolling) {
+        case 'omit':
+          break
+
+        case true:
+          iframe.scrolling = 'yes'
+          break
+
+        case false:
+          iframe.scrolling = 'no'
+          break
+
+        default:
+          iframe.scrolling = settings[iframeId]
+            ? settings[iframeId].scrolling
+            : 'no'
+      }
+    }
+
+    // The V1 iFrame script expects an int, where as in V2 expects a CSS
+    // string value such as '1px 3em', so if we have an int for V2, set V1=V2
+    // and then convert V2 to a string PX value.
+    function setupBodyMarginValues() {
+      if (
+        'number' ===
+          typeof (settings[iframeId] && settings[iframeId].bodyMargin) ||
+        '0' === (settings[iframeId] && settings[iframeId].bodyMargin)
+      ) {
+        settings[iframeId].bodyMarginV1 = settings[iframeId].bodyMargin
+        settings[iframeId].bodyMargin =
+          '' + settings[iframeId].bodyMargin + 'px'
+      }
+    }
+
+    function checkReset() {
+      // Reduce scope of firstRun to function, because IE8's JS execution
+      // context stack is borked and this value gets externally
+      // changed midway through running this function!!!
+      var firstRun = settings[iframeId] && settings[iframeId].firstRun,
+        resetRequertMethod =
+          settings[iframeId] &&
+          settings[iframeId].heightCalculationMethod in resetRequiredMethods
+
+      if (!firstRun && resetRequertMethod) {
+        resetIFrame({ iframe: iframe, height: 0, width: 0, type: 'init' })
+      }
+    }
+
+    function setupIFrameObject() {
+      if (settings[iframeId]) {
+        settings[iframeId].iframe.iFrameResizer = {
+          close: closeIFrame.bind(null, settings[iframeId].iframe),
+
+          removeListeners: removeIframeListeners.bind(
+            null,
+            settings[iframeId].iframe
+          ),
+
+          resize: trigger.bind(
+            null,
+            'Window resize',
+            'resize',
+            settings[iframeId].iframe
+          ),
+
+          moveToAnchor: function(anchor) {
+            trigger(
+              'Move to anchor',
+              'moveToAnchor:' + anchor,
+              settings[iframeId].iframe,
+              iframeId
+            )
+          },
+
+          sendMessage: function(message) {
+            message = JSON.stringify(message)
+            trigger(
+              'Send Message',
+              'message:' + message,
+              settings[iframeId].iframe,
+              iframeId
+            )
+          }
+        }
+      }
+    }
+
+    // We have to call trigger twice, as we can not be sure if all
+    // iframes have completed loading when this code runs. The
+    // event listener also catches the page changing in the iFrame.
+    function init(msg) {
+      function iFrameLoaded() {
+        trigger('iFrame.onload', msg, iframe, undefined, true)
+        checkReset()
+      }
+
+      function createDestroyObserver(MutationObserver) {
+        if (!iframe.parentNode) {
+          return
+        }
+
+        var destroyObserver = new MutationObserver(function(mutations) {
+          mutations.forEach(function(mutation) {
+            var removedNodes = Array.prototype.slice.call(mutation.removedNodes) // Transform NodeList into an Array
+            removedNodes.forEach(function(removedNode) {
+              if (removedNode === iframe) {
+                closeIFrame(iframe)
+              }
+            })
+          })
+        })
+        destroyObserver.observe(iframe.parentNode, {
+          childList: true
+        })
+      }
+
+      var MutationObserver = getMutationObserver()
+      if (MutationObserver) {
+        createDestroyObserver(MutationObserver)
+      }
+
+      addEventListener(iframe, 'load', iFrameLoaded)
+      trigger('init', msg, iframe, undefined, true)
+    }
+
+    function checkOptions(options) {
+      if ('object' !== typeof options) {
+        throw new TypeError('Options is not an object')
+      }
+    }
+
+    function copyOptions(options) {
+      // eslint-disable-next-line no-restricted-syntax
+      for (var option in defaults) {
+        if (Object.prototype.hasOwnProperty.call(defaults, option)) {
+          settings[iframeId][option] = Object.prototype.hasOwnProperty.call(
+            options,
+            option
+          )
+            ? options[option]
+            : defaults[option]
+        }
+      }
+    }
+
+    function getTargetOrigin(remoteHost) {
+      return '' === remoteHost || 'file://' === remoteHost ? '*' : remoteHost
+    }
+
+    function depricate(key) {
+      var splitName = key.split('Callback')
+
+      if (splitName.length === 2) {
+        var name =
+          'on' + splitName[0].charAt(0).toUpperCase() + splitName[0].slice(1)
+        this[name] = this[key]
+        delete this[key]
+        warn(
+          iframeId,
+          "Deprecated: '" +
+            key +
+            "' has been renamed '" +
+            name +
+            "'. The old method will be removed in the next major version."
+        )
+      }
+    }
+
+    function processOptions(options) {
+      options = options || {}
+      settings[iframeId] = {
+        firstRun: true,
+        iframe: iframe,
+        remoteHost: iframe.src
+          .split('/')
+          .slice(0, 3)
+          .join('/')
+      }
+
+      checkOptions(options)
+      Object.keys(options).forEach(depricate, options)
+      copyOptions(options)
+
+      if (settings[iframeId]) {
+        settings[iframeId].targetOrigin =
+          true === settings[iframeId].checkOrigin
+            ? getTargetOrigin(settings[iframeId].remoteHost)
+            : '*'
+      }
+    }
+
+    function beenHere() {
+      return iframeId in settings && 'iFrameResizer' in iframe
+    }
+
+    var iframeId = ensureHasId(iframe.id)
+
+    if (!beenHere()) {
+      processOptions(options)
+      setScrolling()
+      setLimits()
+      setupBodyMarginValues()
+      init(createOutgoingMsg(iframeId))
+      setupIFrameObject()
+    } else {
+      warn(iframeId, 'Ignored iFrame, already setup.')
+    }
+  }
+
+  function debouce(fn, time) {
+    if (null === timer) {
+      timer = setTimeout(function() {
+        timer = null
+        fn()
+      }, time)
+    }
+  }
+
+  var frameTimer = {}
+  function debounceFrameEvents(fn, time, frameId) {
+    if (!frameTimer[frameId]) {
+      frameTimer[frameId] = setTimeout(function() {
+        frameTimer[frameId] = null
+        fn()
+      }, time)
+    }
+  }
+
+  // Not testable in PhantomJS
+  /* istanbul ignore next */
+
+  function fixHiddenIFrames() {
+    function checkIFrames() {
+      function checkIFrame(settingId) {
+        function chkDimension(dimension) {
+          return (
+            '0px' ===
+            (settings[settingId] && settings[settingId].iframe.style[dimension])
+          )
+        }
+
+        function isVisible(el) {
+          return null !== el.offsetParent
+        }
+
+        if (
+          settings[settingId] &&
+          isVisible(settings[settingId].iframe) &&
+          (chkDimension('height') || chkDimension('width'))
+        ) {
+          trigger(
+            'Visibility change',
+            'resize',
+            settings[settingId].iframe,
+            settingId
+          )
+        }
+      }
+
+      Object.keys(settings).forEach(function(key) {
+        checkIFrame(settings[key])
+      })
+    }
+
+    function mutationObserved(mutations) {
+      log(
+        'window',
+        'Mutation observed: ' + mutations[0].target + ' ' + mutations[0].type
+      )
+      debouce(checkIFrames, 16)
+    }
+
+    function createMutationObserver() {
+      var target = document.querySelector('body'),
+        config = {
+          attributes: true,
+          attributeOldValue: false,
+          characterData: true,
+          characterDataOldValue: false,
+          childList: true,
+          subtree: true
+        },
+        observer = new MutationObserver(mutationObserved)
+
+      observer.observe(target, config)
+    }
+
+    var MutationObserver = getMutationObserver()
+    if (MutationObserver) {
+      createMutationObserver()
+    }
+  }
+
+  function resizeIFrames(event) {
+    function resize() {
+      sendTriggerMsg('Window ' + event, 'resize')
+    }
+
+    log('window', 'Trigger event: ' + event)
+    debouce(resize, 16)
+  }
+
+  // Not testable in PhantomJS
+  /* istanbul ignore next */
+  function tabVisible() {
+    function resize() {
+      sendTriggerMsg('Tab Visable', 'resize')
+    }
+
+    if ('hidden' !== document.visibilityState) {
+      log('document', 'Trigger event: Visiblity change')
+      debouce(resize, 16)
+    }
+  }
+
+  function sendTriggerMsg(eventName, event) {
+    function isIFrameResizeEnabled(iframeId) {
+      return (
+        settings[iframeId] &&
+        'parent' === settings[iframeId].resizeFrom &&
+        settings[iframeId].autoResize &&
+        !settings[iframeId].firstRun
+      )
+    }
+
+    Object.keys(settings).forEach(function(iframeId) {
+      if (isIFrameResizeEnabled(iframeId)) {
+        trigger(eventName, event, document.getElementById(iframeId), iframeId)
+      }
+    })
+  }
+
+  function setupEventListeners() {
+    addEventListener(window, 'message', iFrameListener)
+
+    addEventListener(window, 'resize', function() {
+      resizeIFrames('resize')
+    })
+
+    addEventListener(document, 'visibilitychange', tabVisible)
+
+    addEventListener(document, '-webkit-visibilitychange', tabVisible)
+  }
+
+  function factory() {
+    function init(options, element) {
+      function chkType() {
+        if (!element.tagName) {
+          throw new TypeError('Object is not a valid DOM element')
+        } else if ('IFRAME' !== element.tagName.toUpperCase()) {
+          throw new TypeError(
+            'Expected <IFRAME> tag, found <' + element.tagName + '>'
+          )
+        }
+      }
+
+      if (element) {
+        chkType()
+        setupIFrame(element, options)
+        iFrames.push(element)
+      }
+    }
+
+    function warnDeprecatedOptions(options) {
+      if (options && options.enablePublicMethods) {
+        warn(
+          'enablePublicMethods option has been removed, public methods are now always available in the iFrame'
+        )
+      }
+    }
+
+    var iFrames
+
+    setupRequestAnimationFrame()
+    setupEventListeners()
+
+    return function iFrameResizeF(options, target) {
+      iFrames = [] // Only return iFrames past in on this call
+
+      warnDeprecatedOptions(options)
+
+      switch (typeof target) {
+        case 'undefined':
+        case 'string':
+          Array.prototype.forEach.call(
+            document.querySelectorAll(target || 'iframe'),
+            init.bind(undefined, options)
+          )
+          break
+
+        case 'object':
+          init(options, target)
+          break
+
+        default:
+          throw new TypeError('Unexpected data type (' + typeof target + ')')
+      }
+
+      return iFrames
+    }
+  }
+
+  function createJQueryPublicMethod($) {
+    if (!$.fn) {
+      info('', 'Unable to bind to jQuery, it is not fully loaded.')
+    } else if (!$.fn.iFrameResize) {
+      $.fn.iFrameResize = function $iFrameResizeF(options) {
+        function init(index, element) {
+          setupIFrame(element, options)
+        }
+
+        return this.filter('iframe')
+          .each(init)
+          .end()
+      }
+    }
+  }
+
+  if (window.jQuery) {
+    createJQueryPublicMethod(window.jQuery)
+  }
+
+  if (true) {
+    !(__WEBPACK_AMD_DEFINE_ARRAY__ = [], __WEBPACK_AMD_DEFINE_FACTORY__ = (factory),
+				__WEBPACK_AMD_DEFINE_RESULT__ = (typeof __WEBPACK_AMD_DEFINE_FACTORY__ === 'function' ?
+				(__WEBPACK_AMD_DEFINE_FACTORY__.apply(exports, __WEBPACK_AMD_DEFINE_ARRAY__)) : __WEBPACK_AMD_DEFINE_FACTORY__),
+				__WEBPACK_AMD_DEFINE_RESULT__ !== undefined && (module.exports = __WEBPACK_AMD_DEFINE_RESULT__))
+  } else {}
+  window.iFrameResize = window.iFrameResize || factory()
+})()
+
+
+/***/ }),
+
+/***/ "./node_modules/iframe-resizer/js/index.js":
+/*!*************************************************!*\
+  !*** ./node_modules/iframe-resizer/js/index.js ***!
+  \*************************************************/
+/*! no static exports found */
+/***/ (function(module, exports, __webpack_require__) {
+
+exports.iframeResizer = __webpack_require__(/*! ./iframeResizer */ "./node_modules/iframe-resizer/js/iframeResizer.js")
+exports.iframeResizerContentWindow = __webpack_require__(/*! ./iframeResizer.contentWindow */ "./node_modules/iframe-resizer/js/iframeResizer.contentWindow.js")
+
+
+/***/ }),
+
 /***/ "./node_modules/isomorphic-unfetch/browser.js":
 /*!****************************************************!*\
   !*** ./node_modules/isomorphic-unfetch/browser.js ***!
@@ -40253,6 +42937,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var isomorphic_unfetch__WEBPACK_IMPORTED_MODULE_10___default = /*#__PURE__*/__webpack_require__.n(isomorphic_unfetch__WEBPACK_IMPORTED_MODULE_10__);
 /* harmony import */ var d3_scale__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! d3-scale */ "./node_modules/d3-scale/src/index.js");
 /* harmony import */ var _nivo_bar__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! @nivo/bar */ "./node_modules/@nivo/bar/dist/nivo-bar.esm.js");
+/* harmony import */ var iframe_resizer__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! iframe-resizer */ "./node_modules/iframe-resizer/index.js");
+/* harmony import */ var iframe_resizer__WEBPACK_IMPORTED_MODULE_13___default = /*#__PURE__*/__webpack_require__.n(iframe_resizer__WEBPACK_IMPORTED_MODULE_13__);
 
 
 
@@ -40261,6 +42947,7 @@ __webpack_require__.r(__webpack_exports__);
 
 
 var _jsxFileName = "/home/thomas/repos/mes-aides-stats/next/pages/index.js";
+
 
 
 
@@ -40380,7 +43067,7 @@ var MyResponsiveBar = function MyResponsiveBar(_ref) {
     animate: false,
     __source: {
       fileName: _jsxFileName,
-      lineNumber: 69
+      lineNumber: 70
     },
     __self: this
   });
@@ -40470,38 +43157,45 @@ function Home() {
     className: "jsx-1655332064",
     __source: {
       fileName: _jsxFileName,
-      lineNumber: 115
+      lineNumber: 116
     },
     __self: this
   }, react__WEBPACK_IMPORTED_MODULE_8___default.a.createElement(styled_jsx_style__WEBPACK_IMPORTED_MODULE_7___default.a, {
     id: "1655332064",
     __self: this
-  }, ".chart.jsx-1655332064{height:300px;}.list.jsx-1655332064{display:-webkit-box;display:-webkit-flex;display:-ms-flexbox;display:flex;-webkit-flex-wrap:wrap;-ms-flex-wrap:wrap;flex-wrap:wrap;}.cell.jsx-1655332064{width:300px;display:-webkit-box;display:-webkit-flex;display:-ms-flexbox;display:flex;-webkit-flex-direction:column;-ms-flex-direction:column;flex-direction:column;-webkit-box-pack:justify;-webkit-justify-content:space-between;-ms-flex-pack:justify;justify-content:space-between;}h3.jsx-1655332064{margin:0;}\n/*# sourceMappingURL=data:application/json;charset=utf-8;base64,eyJ2ZXJzaW9uIjozLCJzb3VyY2VzIjpbIi9ob21lL3Rob21hcy9yZXBvcy9tZXMtYWlkZXMtc3RhdHMvbmV4dC9wYWdlcy9pbmRleC5qcyJdLCJuYW1lcyI6W10sIm1hcHBpbmdzIjoiQUFtSG9CLEFBRzhCLEFBR0EsQUFJRCxBQU1ILFNBQ2IsR0FOaUIsQ0FQakIsNkRBR21CLFlBS08sNkNBSjFCLGlDQUtrQyxtSEFDbEMiLCJmaWxlIjoiL2hvbWUvdGhvbWFzL3JlcG9zL21lcy1haWRlcy1zdGF0cy9uZXh0L3BhZ2VzL2luZGV4LmpzIiwic291cmNlc0NvbnRlbnQiOlsiaW1wb3J0IHt1c2VTdGF0ZSwgdXNlQ2FsbGJhY2ssIHVzZUVmZmVjdH0gZnJvbSAncmVhY3QnXG5pbXBvcnQge2NhdGVnb3JpY2FsQ29sb3JTY2hlbWVzfSBmcm9tICdAbml2by9jb2xvcnMnXG5pbXBvcnQgZmV0Y2ggZnJvbSAnaXNvbW9ycGhpYy11bmZldGNoJ1xuaW1wb3J0IHsgc2NhbGVPcmRpbmFsIH0gZnJvbSAnZDMtc2NhbGUnXG5pbXBvcnQgeyBSZXNwb25zaXZlQmFyIH0gZnJvbSAnQG5pdm8vYmFyJ1xuXG5jb25zdCBjYXRNYXBwaW5nID0ge1xuICAgIHNob3c6IHsgY2F0OiAnQWZmaWNow6knIH0sXG4gICAgY2xpY2s6IHsgY2F0OiAnQ2xpcXXDqScgfSxcbiAgICBmb3JtOiB7IGNhdDogJ0FjdGlvbm7DqScsIG5hbWU6ICdGb3JtdWxhaXJlJyB9LFxuICAgIHRlbGVzZXJ2aWNlOiB7IGNhdDogJ0FjdGlvbm7DqScsIG5hbWU6ICdUw6lsw6lzZXJ2aWNlJyB9LFxuICAgIGluc3RydWN0aW9uczogeyBjYXQ6ICdBY3Rpb25uw6knLCBuYW1lOiAnSW5zdHJ1Y3Rpb25zJyB9LFxuICAgIGxpbms6IHsgY2F0OiAnQWN0aW9ubsOpJywgbmFtZTogJ0xpZW4nIH0sXG4gICAgbXNhOiB7IGNhdDogJ0FjdGlvbm7DqScsIG5hbWU6ICdNU0EnIH0sXG4gICAgJ3Nob3ctdW5leHBlY3RlZCc6IHsgY2F0OiAnSW5jb21wcmlzJ30sXG4gICAgY2xvc2U6IHsgY2F0OiAnRXhwbGlxdcOpJywgbmFtZTogJ0Zlcm3DqSd9LFxuICAgICdyZXRvdXItbG9nZW1lbnQnOiAge2NhdDogJ0V4cGxpcXXDqScsIG5hbWU6ICdSZXRvdXIgcGFnZSBsb2dlbWVudCd9LFxuICAgICdzaW11bGF0aW9uLWNhZic6ICB7Y2F0OiAnRXhwbGlxdcOpJywgbmFtZTogJ1NpbXVsYXRldXIgQ0FGJ30sXG4gICAgZW1haWw6IHsgY2F0OiAnRXhwbGlxdcOpJywgbmFtZTogJ0VtYWlsJ30sXG59XG5cbmNvbnN0IGNhdHMgPSBbXG4gICAgJ0FmZmljaMOpJyxcbiAgICAnQ2xpcXXDqScsXG4gICAgJ0FjdGlvbm7DqScsXG4gICAgJ0luY29tcHJpcycsXG4gICAgJ0V4cGxpcXXDqSdcbl1cbmNvbnN0IGNvbG9ycyA9IHNjYWxlT3JkaW5hbChjYXRlZ29yaWNhbENvbG9yU2NoZW1lcy5jYXRlZ29yeTEwKVxuXG5mdW5jdGlvbiBhcHBseShwcm9wLCBiYXNlLCBzaG91bGRTaG93KSB7XG4gICAgbGV0IHJlc3VsdCA9IGJhc2Uuc3VidGFibGUucmVkdWNlKChhY2N1bSwgdGFibGUpID0+IHtcbiAgICAgICAgaWYgKCFjYXRNYXBwaW5nW3RhYmxlLmxhYmVsXSkge1xuICAgICAgICAgICAgcmV0dXJuIGFjY3VtXG4gICAgICAgIH1cbiAgICAgICAgYWNjdW1bY2F0TWFwcGluZ1t0YWJsZS5sYWJlbF0uY2F0XSA9IGFjY3VtW2NhdE1hcHBpbmdbdGFibGUubGFiZWxdLmNhdF0gfHwge1xuICAgICAgICAgICAgY2F0ZWdvcnk6IGNhdE1hcHBpbmdbdGFibGUubGFiZWxdLmNhdFxuICAgICAgICB9XG4gICAgICAgIGFjY3VtW2NhdE1hcHBpbmdbdGFibGUubGFiZWxdLmNhdF1bdGFibGUubGFiZWxdID0gdGFibGVbcHJvcF1cbiAgICAgICAgcmV0dXJuIGFjY3VtXG4gICAgfSwge30pXG5cbiAgICBPYmplY3Qua2V5cyhzaG91bGRTaG93KS5mb3JFYWNoKGsgPT4ge1xuICAgICAgICBpZiAoIXNob3VsZFNob3dba10pIHtcbiAgICAgICAgICAgIGRlbGV0ZSByZXN1bHRba11cbiAgICAgICAgfVxuICAgIH0pXG5cbiAgICByZXR1cm4gT2JqZWN0LnZhbHVlcyhyZXN1bHQpXG59XG5cbmNvbnN0IHNvdXJjZXMgPSB7XG4vLyAgICBuYl91bmlxX3Zpc2l0b3JzOiAnVmlzaXRldXIgdW5pcXVlJywgLy8gTm9uIGZvbmN0aW9ubmVsIGF2ZWMgbGVzIGRvbm7DqWVzIG1lbnN1ZWxsZXNcbiAgICBuYl92aXNpdHM6ICdWaXNpdGUnLFxuICAgIG5iX2V2ZW50czogJ8OJdsOobmVtZW50J1xufVxuXG5jb25zdCBwZXJpb2RzID0ge1xuICAgIGRheTogJ0hpZXInLFxuICAgIG1vbnRoOiAnTW9pcyBlbiBjb3Vycydcbn1cblxuLy8gbWFrZSBzdXJlIHBhcmVudCBjb250YWluZXIgaGF2ZSBhIGRlZmluZWQgaGVpZ2h0IHdoZW4gdXNpbmdcbi8vIHJlc3BvbnNpdmUgY29tcG9uZW50LCBvdGhlcndpc2UgaGVpZ2h0IHdpbGwgYmUgMCBhbmRcbi8vIG5vIGNoYXJ0IHdpbGwgYmUgcmVuZGVyZWQuXG4vLyB3ZWJzaXRlIGV4YW1wbGVzIHNob3djYXNlIG1hbnkgcHJvcGVydGllcyxcbi8vIHlvdSdsbCBvZnRlbiB1c2UganVzdCBhIGZldyBvZiB0aGVtLlxuY29uc3QgTXlSZXNwb25zaXZlQmFyID0gKHsgZGF0YSAvKiBzZWUgZGF0YSB0YWIgKi8gfSkgPT4gKFxuICAgIDxSZXNwb25zaXZlQmFyXG4gICAgICAgIGRhdGE9e2RhdGF9XG4gICAgICAgIGtleXM9e09iamVjdC5rZXlzKGNhdE1hcHBpbmcpfVxuICAgICAgICBpbmRleEJ5PVwiY2F0ZWdvcnlcIlxuICAgICAgICBtYXJnaW49e3sgdG9wOiAxNSwgcmlnaHQ6IDEwLCBib3R0b206IDUwLCBsZWZ0OiA2MCB9fVxuICAgICAgICBwYWRkaW5nPXswLjN9XG4gICAgICAgIGNvbG9ycz17KHsgaWQgfSkgPT4gY29sb3JzKGlkKX1cbiAgICAgICAgYm9yZGVyQ29sb3I9e3sgZnJvbTogJ2NvbG9yJywgbW9kaWZpZXJzOiBbIFsgJ2RhcmtlcicsIDEuNiBdIF0gfX1cbiAgICAgICAgYW5pbWF0ZT17ZmFsc2V9XG4gICAgLz5cbilcblxuZnVuY3Rpb24gSG9tZSgpIHtcbiAgICBjb25zdCBbYmVuZWZpdHMsIHNldEJlbmVmaXRzXSA9IHVzZVN0YXRlKFtdKTtcbiAgICBjb25zdCBbcGVyaW9kLCBzZXRQZXJpb2RdID0gdXNlU3RhdGUoJ2RheScpO1xuICAgIGNvbnN0IFtzb3VyY2UsIHNldFNvdXJjZV0gPSB1c2VTdGF0ZSgnbmJfdmlzaXRzJyk7XG4gICAgY29uc3QgW3Nob3csIHNldFNob3ddID0gdXNlU3RhdGUoY2F0cy5yZWR1Y2UoKGFjY3VtLCBjKSA9PiB7XG4gICAgICAgIGFjY3VtW2NdID0gdHJ1ZVxuICAgICAgICByZXR1cm4gYWNjdW1cbiAgICB9LCB7fSkpXG5cbiAgICBhc3luYyBmdW5jdGlvbiBmZXRjaERhdGEocGVyaW9kKSB7XG4gICAgICAgIHRyeSB7XG4gICAgICAgICAgICBjb25zdCByZXMgPSBhd2FpdCBmZXRjaChgaHR0cHM6Ly9zdGF0cy5kYXRhLmdvdXYuZnIvaW5kZXgucGhwP2RhdGU9eWVzdGVyZGF5JmV4cGFuZGVkPTEmZmlsdGVyX2xpbWl0PTUwJmZvcm1hdD1KU09OJmlkU2l0ZT05Jm1ldGhvZD1FdmVudHMuZ2V0TmFtZSZtb2R1bGU9QVBJJnBlcmlvZD0ke3BlcmlvZH1gKVxuICAgICAgICAgICAgY29uc3QganNvbiA9IGF3YWl0IHJlcy5qc29uKClcbiAgICAgICAgICAgIHNldEJlbmVmaXRzKGpzb24pXG4gICAgICAgIH0gY2F0Y2gge1xuICAgICAgICAgICAgc2V0QmVuZWZpdHMoW10pXG4gICAgICAgIH1cbiAgICB9XG5cbiAgICB1c2VFZmZlY3QoKCkgPT4ge1xuICAgICAgZmV0Y2hEYXRhKHBlcmlvZClcbiAgICB9LCBbXSlcblxuICAgIGNvbnN0IGhhbmRsZVBlcmlvZENoYW5nZSA9IHVzZUNhbGxiYWNrKGUgPT4ge1xuICAgICAgICBzZXRQZXJpb2QoZS50YXJnZXQudmFsdWUpXG4gICAgICAgIGZldGNoRGF0YShlLnRhcmdldC52YWx1ZSlcbiAgICB9KVxuICAgIGNvbnN0IGhhbmRsZVNvdXJjZUNoYW5nZSA9IHVzZUNhbGxiYWNrKGUgPT4ge1xuICAgICAgICBzZXRTb3VyY2UoZS50YXJnZXQudmFsdWUpXG4gICAgfSlcbiAgICBjb25zdCBoYW5kbGVTaG93Q2hhbmdlID0gdXNlQ2FsbGJhY2soKGNhdCwgdmFsdWUpID0+IHtcbiAgICAgICAgc2V0U2hvdyh7Li4uc2hvdywgW2NhdF06IHZhbHVlfSlcbiAgICB9KVxuICAgIHJldHVybiAoXG4gICAgICAgIDxkaXY+XG4gICAgICAgIDxzdHlsZSBqc3g+e2BcbiAgICAgICAgICAgIC5jaGFydCB7XG4gICAgICAgICAgICAgICAgaGVpZ2h0OiAzMDBweDtcbiAgICAgICAgICAgIH1cbiAgICAgICAgICAgIC5saXN0IHtcbiAgICAgICAgICAgICAgICBkaXNwbGF5OiBmbGV4O1xuICAgICAgICAgICAgICAgIGZsZXgtd3JhcDogd3JhcDtcbiAgICAgICAgICAgIH1cbiAgICAgICAgICAgIC5jZWxsIHtcbiAgICAgICAgICAgICAgICB3aWR0aDogMzAwcHg7XG4gICAgICAgICAgICAgICAgZGlzcGxheTogZmxleDtcbiAgICAgICAgICAgICAgICBmbGV4LWRpcmVjdGlvbjogY29sdW1uO1xuICAgICAgICAgICAgICAgIGp1c3RpZnktY29udGVudDogc3BhY2UtYmV0d2VlbjtcbiAgICAgICAgICAgIH1cbiAgICAgICAgICAgIGgzIHtcbiAgICAgICAgICAgICAgICBtYXJnaW46IDA7XG4gICAgICAgICAgICB9XG4gICAgICAgICAgYH08L3N0eWxlPlxuICAgICAgICAgIDxkaXYgY2xhc3NOYW1lPVwibGlzdFwiPlxuICAgICAgICAgICAgICAgIDxkaXYgY2xhc3NOYW1lPVwiY2VsbFwiPlxuICAgICAgICAgICAgICAgICAgICA8ZGl2PjxsYWJlbD5cbiAgICAgICAgICAgICAgICAgICAgICAgIFDDqXJpb2RlIGRlIHLDqWbDqXJlbmNlXG4gICAgICAgICAgICAgICAgICAgICAgICA8c2VsZWN0IG9uQ2hhbmdlPXtoYW5kbGVQZXJpb2RDaGFuZ2V9IGRlZmF1bHRWYWx1ZT17cGVyaW9kfT5cbiAgICAgICAgICAgICAgICAgICAgICAgIHtcbiAgICAgICAgICAgICAgICAgICAgICAgICAgICBPYmplY3Qua2V5cyhwZXJpb2RzKS5tYXAoayA9PiB7XG4gICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIHJldHVybiA8b3B0aW9uIGtleT17a30gdmFsdWU9e2t9PntwZXJpb2RzW2tdfTwvb3B0aW9uPlxuICAgICAgICAgICAgICAgICAgICAgICAgICAgIH0pXG4gICAgICAgICAgICAgICAgICAgICAgICB9XG4gICAgICAgICAgICAgICAgICAgICAgICA8L3NlbGVjdD5cbiAgICAgICAgICAgICAgICAgICAgPC9sYWJlbD48L2Rpdj5cbiAgICAgICAgICAgICAgICAgICAgPGRpdj48bGFiZWw+XG4gICAgICAgICAgICAgICAgICAgICAgICBTb3VyY2UgZGVzIGRvbm7DqWVzXG4gICAgICAgICAgICAgICAgICAgICAgICA8c2VsZWN0IG9uQ2hhbmdlPXtoYW5kbGVTb3VyY2VDaGFuZ2V9IGRlZmF1bHRWYWx1ZT17c291cmNlfT5cbiAgICAgICAgICAgICAgICAgICAgICAgIHtcbiAgICAgICAgICAgICAgICAgICAgICAgICAgICBPYmplY3Qua2V5cyhzb3VyY2VzKS5tYXAoayA9PiB7XG4gICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIHJldHVybiA8b3B0aW9uIGtleT17a30gdmFsdWU9e2t9Pntzb3VyY2VzW2tdfTwvb3B0aW9uPlxuICAgICAgICAgICAgICAgICAgICAgICAgICAgIH0pXG4gICAgICAgICAgICAgICAgICAgICAgICB9XG4gICAgICAgICAgICAgICAgICAgICAgICA8L3NlbGVjdD5cbiAgICAgICAgICAgICAgICAgICAgPC9sYWJlbD48L2Rpdj5cbiAgICAgICAgICAgICAgICAgICAgPHRhYmxlPlxuICAgICAgICAgICAgICAgICAgICA8dGJvZHk+XG4gICAgICAgICAgICAgICAgICAgIHtcbiAgICAgICAgICAgICAgICAgICAgICAgIGNhdHMubWFwKGNhdCA9PiB7XG4gICAgICAgICAgICAgICAgICAgICAgICAgICAgcmV0dXJuIChcbiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgPHRyIGtleT17Y2F0fT5cbiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIDx0ZD5cbiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICA8bGFiZWw+e3Nob3dbY2F0XX08aW5wdXQgdHlwZT1cImNoZWNrYm94XCIgY2hlY2tlZD17c2hvd1tjYXRdfSBvbkNoYW5nZT17ZSA9PiBoYW5kbGVTaG93Q2hhbmdlKGNhdCwgZS50YXJnZXQuY2hlY2tlZCl9IC8+XG4gICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAge2NhdH08L2xhYmVsPlxuICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgPC90ZD5cbiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIDx0ZD5cbiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIHtPYmplY3Qua2V5cyhjYXRNYXBwaW5nKS5tYXAoY2F0SWQgPT4ge1xuICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIGlmIChjYXRNYXBwaW5nW2NhdElkXS5jYXQgPT09IGNhdCkge1xuICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICByZXR1cm4gPGRpdiBrZXk9e2NhdElkfT48c3BhbiBzdHlsZT17e2NvbG9yOmNvbG9ycyhjYXRJZCl9fT7il7w8L3NwYW4+Jm5ic3A7e2NhdE1hcHBpbmdbY2F0SWRdLm5hbWUgfHwgY2F0TWFwcGluZ1tjYXRJZF0uY2F0fTwvZGl2PlxuICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIH1cbiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIH0pfVxuICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgPC90ZD5cbiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgPC90cj5cbiAgICAgICAgICAgICAgICAgICAgICAgICAgICApXG4gICAgICAgICAgICAgICAgICAgICAgICB9KVxuICAgICAgICAgICAgICAgICAgICB9XG4gICAgICAgICAgICAgICAgICAgIDwvdGJvZHk+XG4gICAgICAgICAgICAgICAgICAgIDwvdGFibGU+XG4gICAgICAgICAgICAgICAgPC9kaXY+XG4gICAgICAgICAge2JlbmVmaXRzLm1hcChiID0+IHtcbiAgICAgICAgICAgIGxldCBsID0gYi5sYWJlbFxuICAgICAgICAgICAgbGV0IGRhdGEgPSBhcHBseShzb3VyY2UsIGIsIHNob3cpXG5cbiAgICAgICAgICAgIGlmICghZGF0YS5sZW5ndGgpIHtcbiAgICAgICAgICAgICAgICByZXR1cm5cbiAgICAgICAgICAgIH1cblxuICAgICAgICAgICAgcmV0dXJuIChcbiAgICAgICAgICAgICAgICA8ZGl2IGtleT17bH0gY2xhc3NOYW1lPVwiY2VsbFwiPlxuICAgICAgICAgICAgICAgICAgICA8aDM+e2x9PC9oMz5cbiAgICAgICAgICAgICAgICAgICAgPGRpdiBjbGFzc05hbWU9XCJjaGFydFwiPlxuICAgICAgICAgICAgICAgICAgICAgICAgPE15UmVzcG9uc2l2ZUJhciBkYXRhPXtkYXRhfSAvPlxuICAgICAgICAgICAgICAgICAgICA8L2Rpdj5cbiAgICAgICAgICAgICAgICA8L2Rpdj5cbiAgICAgICAgICAgIClcbiAgICAgICAgICB9KX1cbiAgICAgICAgICA8L2Rpdj5cbiAgICAgICAgPC9kaXY+XG4gICAgKTtcbn1cblxuZXhwb3J0IGRlZmF1bHQgSG9tZTtcbiJdfQ== */\n/*@ sourceURL=/home/thomas/repos/mes-aides-stats/next/pages/index.js */"), react__WEBPACK_IMPORTED_MODULE_8___default.a.createElement("div", {
+  }, ".chart.jsx-1655332064{height:300px;}.list.jsx-1655332064{display:-webkit-box;display:-webkit-flex;display:-ms-flexbox;display:flex;-webkit-flex-wrap:wrap;-ms-flex-wrap:wrap;flex-wrap:wrap;}.cell.jsx-1655332064{width:300px;display:-webkit-box;display:-webkit-flex;display:-ms-flexbox;display:flex;-webkit-flex-direction:column;-ms-flex-direction:column;flex-direction:column;-webkit-box-pack:justify;-webkit-justify-content:space-between;-ms-flex-pack:justify;justify-content:space-between;}h3.jsx-1655332064{margin:0;}\n/*# sourceMappingURL=data:application/json;charset=utf-8;base64,eyJ2ZXJzaW9uIjozLCJzb3VyY2VzIjpbIi9ob21lL3Rob21hcy9yZXBvcy9tZXMtYWlkZXMtc3RhdHMvbmV4dC9wYWdlcy9pbmRleC5qcyJdLCJuYW1lcyI6W10sIm1hcHBpbmdzIjoiQUFvSG9CLEFBRzhCLEFBR0EsQUFJRCxBQU1ILFNBQ2IsR0FOaUIsQ0FQakIsNkRBR21CLFlBS08sNkNBSjFCLGlDQUtrQyxtSEFDbEMiLCJmaWxlIjoiL2hvbWUvdGhvbWFzL3JlcG9zL21lcy1haWRlcy1zdGF0cy9uZXh0L3BhZ2VzL2luZGV4LmpzIiwic291cmNlc0NvbnRlbnQiOlsiaW1wb3J0IHt1c2VTdGF0ZSwgdXNlQ2FsbGJhY2ssIHVzZUVmZmVjdH0gZnJvbSAncmVhY3QnXG5pbXBvcnQge2NhdGVnb3JpY2FsQ29sb3JTY2hlbWVzfSBmcm9tICdAbml2by9jb2xvcnMnXG5pbXBvcnQgZmV0Y2ggZnJvbSAnaXNvbW9ycGhpYy11bmZldGNoJ1xuaW1wb3J0IHsgc2NhbGVPcmRpbmFsIH0gZnJvbSAnZDMtc2NhbGUnXG5pbXBvcnQgeyBSZXNwb25zaXZlQmFyIH0gZnJvbSAnQG5pdm8vYmFyJ1xuaW1wb3J0ICdpZnJhbWUtcmVzaXplcidcblxuY29uc3QgY2F0TWFwcGluZyA9IHtcbiAgICBzaG93OiB7IGNhdDogJ0FmZmljaMOpJyB9LFxuICAgIGNsaWNrOiB7IGNhdDogJ0NsaXF1w6knIH0sXG4gICAgZm9ybTogeyBjYXQ6ICdBY3Rpb25uw6knLCBuYW1lOiAnRm9ybXVsYWlyZScgfSxcbiAgICB0ZWxlc2VydmljZTogeyBjYXQ6ICdBY3Rpb25uw6knLCBuYW1lOiAnVMOpbMOpc2VydmljZScgfSxcbiAgICBpbnN0cnVjdGlvbnM6IHsgY2F0OiAnQWN0aW9ubsOpJywgbmFtZTogJ0luc3RydWN0aW9ucycgfSxcbiAgICBsaW5rOiB7IGNhdDogJ0FjdGlvbm7DqScsIG5hbWU6ICdMaWVuJyB9LFxuICAgIG1zYTogeyBjYXQ6ICdBY3Rpb25uw6knLCBuYW1lOiAnTVNBJyB9LFxuICAgICdzaG93LXVuZXhwZWN0ZWQnOiB7IGNhdDogJ0luY29tcHJpcyd9LFxuICAgIGNsb3NlOiB7IGNhdDogJ0V4cGxpcXXDqScsIG5hbWU6ICdGZXJtw6knfSxcbiAgICAncmV0b3VyLWxvZ2VtZW50JzogIHtjYXQ6ICdFeHBsaXF1w6knLCBuYW1lOiAnUmV0b3VyIHBhZ2UgbG9nZW1lbnQnfSxcbiAgICAnc2ltdWxhdGlvbi1jYWYnOiAge2NhdDogJ0V4cGxpcXXDqScsIG5hbWU6ICdTaW11bGF0ZXVyIENBRid9LFxuICAgIGVtYWlsOiB7IGNhdDogJ0V4cGxpcXXDqScsIG5hbWU6ICdFbWFpbCd9LFxufVxuXG5jb25zdCBjYXRzID0gW1xuICAgICdBZmZpY2jDqScsXG4gICAgJ0NsaXF1w6knLFxuICAgICdBY3Rpb25uw6knLFxuICAgICdJbmNvbXByaXMnLFxuICAgICdFeHBsaXF1w6knXG5dXG5jb25zdCBjb2xvcnMgPSBzY2FsZU9yZGluYWwoY2F0ZWdvcmljYWxDb2xvclNjaGVtZXMuY2F0ZWdvcnkxMClcblxuZnVuY3Rpb24gYXBwbHkocHJvcCwgYmFzZSwgc2hvdWxkU2hvdykge1xuICAgIGxldCByZXN1bHQgPSBiYXNlLnN1YnRhYmxlLnJlZHVjZSgoYWNjdW0sIHRhYmxlKSA9PiB7XG4gICAgICAgIGlmICghY2F0TWFwcGluZ1t0YWJsZS5sYWJlbF0pIHtcbiAgICAgICAgICAgIHJldHVybiBhY2N1bVxuICAgICAgICB9XG4gICAgICAgIGFjY3VtW2NhdE1hcHBpbmdbdGFibGUubGFiZWxdLmNhdF0gPSBhY2N1bVtjYXRNYXBwaW5nW3RhYmxlLmxhYmVsXS5jYXRdIHx8IHtcbiAgICAgICAgICAgIGNhdGVnb3J5OiBjYXRNYXBwaW5nW3RhYmxlLmxhYmVsXS5jYXRcbiAgICAgICAgfVxuICAgICAgICBhY2N1bVtjYXRNYXBwaW5nW3RhYmxlLmxhYmVsXS5jYXRdW3RhYmxlLmxhYmVsXSA9IHRhYmxlW3Byb3BdXG4gICAgICAgIHJldHVybiBhY2N1bVxuICAgIH0sIHt9KVxuXG4gICAgT2JqZWN0LmtleXMoc2hvdWxkU2hvdykuZm9yRWFjaChrID0+IHtcbiAgICAgICAgaWYgKCFzaG91bGRTaG93W2tdKSB7XG4gICAgICAgICAgICBkZWxldGUgcmVzdWx0W2tdXG4gICAgICAgIH1cbiAgICB9KVxuXG4gICAgcmV0dXJuIE9iamVjdC52YWx1ZXMocmVzdWx0KVxufVxuXG5jb25zdCBzb3VyY2VzID0ge1xuLy8gICAgbmJfdW5pcV92aXNpdG9yczogJ1Zpc2l0ZXVyIHVuaXF1ZScsIC8vIE5vbiBmb25jdGlvbm5lbCBhdmVjIGxlcyBkb25uw6llcyBtZW5zdWVsbGVzXG4gICAgbmJfdmlzaXRzOiAnVmlzaXRlJyxcbiAgICBuYl9ldmVudHM6ICfDiXbDqG5lbWVudCdcbn1cblxuY29uc3QgcGVyaW9kcyA9IHtcbiAgICBkYXk6ICdIaWVyJyxcbiAgICBtb250aDogJ01vaXMgZW4gY291cnMnXG59XG5cbi8vIG1ha2Ugc3VyZSBwYXJlbnQgY29udGFpbmVyIGhhdmUgYSBkZWZpbmVkIGhlaWdodCB3aGVuIHVzaW5nXG4vLyByZXNwb25zaXZlIGNvbXBvbmVudCwgb3RoZXJ3aXNlIGhlaWdodCB3aWxsIGJlIDAgYW5kXG4vLyBubyBjaGFydCB3aWxsIGJlIHJlbmRlcmVkLlxuLy8gd2Vic2l0ZSBleGFtcGxlcyBzaG93Y2FzZSBtYW55IHByb3BlcnRpZXMsXG4vLyB5b3UnbGwgb2Z0ZW4gdXNlIGp1c3QgYSBmZXcgb2YgdGhlbS5cbmNvbnN0IE15UmVzcG9uc2l2ZUJhciA9ICh7IGRhdGEgLyogc2VlIGRhdGEgdGFiICovIH0pID0+IChcbiAgICA8UmVzcG9uc2l2ZUJhclxuICAgICAgICBkYXRhPXtkYXRhfVxuICAgICAgICBrZXlzPXtPYmplY3Qua2V5cyhjYXRNYXBwaW5nKX1cbiAgICAgICAgaW5kZXhCeT1cImNhdGVnb3J5XCJcbiAgICAgICAgbWFyZ2luPXt7IHRvcDogMTUsIHJpZ2h0OiAxMCwgYm90dG9tOiA1MCwgbGVmdDogNjAgfX1cbiAgICAgICAgcGFkZGluZz17MC4zfVxuICAgICAgICBjb2xvcnM9eyh7IGlkIH0pID0+IGNvbG9ycyhpZCl9XG4gICAgICAgIGJvcmRlckNvbG9yPXt7IGZyb206ICdjb2xvcicsIG1vZGlmaWVyczogWyBbICdkYXJrZXInLCAxLjYgXSBdIH19XG4gICAgICAgIGFuaW1hdGU9e2ZhbHNlfVxuICAgIC8+XG4pXG5cbmZ1bmN0aW9uIEhvbWUoKSB7XG4gICAgY29uc3QgW2JlbmVmaXRzLCBzZXRCZW5lZml0c10gPSB1c2VTdGF0ZShbXSk7XG4gICAgY29uc3QgW3BlcmlvZCwgc2V0UGVyaW9kXSA9IHVzZVN0YXRlKCdkYXknKTtcbiAgICBjb25zdCBbc291cmNlLCBzZXRTb3VyY2VdID0gdXNlU3RhdGUoJ25iX3Zpc2l0cycpO1xuICAgIGNvbnN0IFtzaG93LCBzZXRTaG93XSA9IHVzZVN0YXRlKGNhdHMucmVkdWNlKChhY2N1bSwgYykgPT4ge1xuICAgICAgICBhY2N1bVtjXSA9IHRydWVcbiAgICAgICAgcmV0dXJuIGFjY3VtXG4gICAgfSwge30pKVxuXG4gICAgYXN5bmMgZnVuY3Rpb24gZmV0Y2hEYXRhKHBlcmlvZCkge1xuICAgICAgICB0cnkge1xuICAgICAgICAgICAgY29uc3QgcmVzID0gYXdhaXQgZmV0Y2goYGh0dHBzOi8vc3RhdHMuZGF0YS5nb3V2LmZyL2luZGV4LnBocD9kYXRlPXllc3RlcmRheSZleHBhbmRlZD0xJmZpbHRlcl9saW1pdD01MCZmb3JtYXQ9SlNPTiZpZFNpdGU9OSZtZXRob2Q9RXZlbnRzLmdldE5hbWUmbW9kdWxlPUFQSSZwZXJpb2Q9JHtwZXJpb2R9YClcbiAgICAgICAgICAgIGNvbnN0IGpzb24gPSBhd2FpdCByZXMuanNvbigpXG4gICAgICAgICAgICBzZXRCZW5lZml0cyhqc29uKVxuICAgICAgICB9IGNhdGNoIHtcbiAgICAgICAgICAgIHNldEJlbmVmaXRzKFtdKVxuICAgICAgICB9XG4gICAgfVxuXG4gICAgdXNlRWZmZWN0KCgpID0+IHtcbiAgICAgIGZldGNoRGF0YShwZXJpb2QpXG4gICAgfSwgW10pXG5cbiAgICBjb25zdCBoYW5kbGVQZXJpb2RDaGFuZ2UgPSB1c2VDYWxsYmFjayhlID0+IHtcbiAgICAgICAgc2V0UGVyaW9kKGUudGFyZ2V0LnZhbHVlKVxuICAgICAgICBmZXRjaERhdGEoZS50YXJnZXQudmFsdWUpXG4gICAgfSlcbiAgICBjb25zdCBoYW5kbGVTb3VyY2VDaGFuZ2UgPSB1c2VDYWxsYmFjayhlID0+IHtcbiAgICAgICAgc2V0U291cmNlKGUudGFyZ2V0LnZhbHVlKVxuICAgIH0pXG4gICAgY29uc3QgaGFuZGxlU2hvd0NoYW5nZSA9IHVzZUNhbGxiYWNrKChjYXQsIHZhbHVlKSA9PiB7XG4gICAgICAgIHNldFNob3coey4uLnNob3csIFtjYXRdOiB2YWx1ZX0pXG4gICAgfSlcbiAgICByZXR1cm4gKFxuICAgICAgICA8ZGl2PlxuICAgICAgICA8c3R5bGUganN4PntgXG4gICAgICAgICAgICAuY2hhcnQge1xuICAgICAgICAgICAgICAgIGhlaWdodDogMzAwcHg7XG4gICAgICAgICAgICB9XG4gICAgICAgICAgICAubGlzdCB7XG4gICAgICAgICAgICAgICAgZGlzcGxheTogZmxleDtcbiAgICAgICAgICAgICAgICBmbGV4LXdyYXA6IHdyYXA7XG4gICAgICAgICAgICB9XG4gICAgICAgICAgICAuY2VsbCB7XG4gICAgICAgICAgICAgICAgd2lkdGg6IDMwMHB4O1xuICAgICAgICAgICAgICAgIGRpc3BsYXk6IGZsZXg7XG4gICAgICAgICAgICAgICAgZmxleC1kaXJlY3Rpb246IGNvbHVtbjtcbiAgICAgICAgICAgICAgICBqdXN0aWZ5LWNvbnRlbnQ6IHNwYWNlLWJldHdlZW47XG4gICAgICAgICAgICB9XG4gICAgICAgICAgICBoMyB7XG4gICAgICAgICAgICAgICAgbWFyZ2luOiAwO1xuICAgICAgICAgICAgfVxuICAgICAgICAgIGB9PC9zdHlsZT5cbiAgICAgICAgICAgIDxwPlxuICAgICAgICAgICAgICAgIExlcyBncmFwaGlxdWVzIHN1aXZhbnRzIHJlcHLDqXNlbnRlbnQgbGVzIHRhdXggZGUgY29udmVyc2lvbiBzdXIgbGEgcGFnZSBkZSBwcsOpc2VudGF0aW9uIGRlIHLDqXN1bHRhdHMgc3VyIGxlIHNpbXVsYXRldXIuXG4gICAgICAgICAgICAgICAgRGlmZsOpcmVudHMgw6l2w6huZW1lbnRzIHNvbnQgY2FwdHVyw6lzIHBvdXIgbWlldXggw6l2YWx1ZXIgbCdpbXBhY3QgZHUgc2ltdWxhdGV1ciBzdXIgbGUgbm9uLXJlY291cnMgYXV4IGRpc3Bvc2l0aWZzIHByw6lzZW50w6lzIGF1eCB1c2FnZXJzLlxuICAgICAgICAgICAgPC9wPlxuICAgICAgICAgICAgPGRpdiBjbGFzc05hbWU9XCJsaXN0XCI+XG4gICAgICAgICAgICAgICAgPGRpdiBjbGFzc05hbWU9XCJjZWxsXCI+XG4gICAgICAgICAgICAgICAgICAgIDxkaXY+PGxhYmVsPlxuICAgICAgICAgICAgICAgICAgICAgICAgUMOpcmlvZGUgZGUgcsOpZsOpcmVuY2VcbiAgICAgICAgICAgICAgICAgICAgICAgIDxzZWxlY3Qgb25DaGFuZ2U9e2hhbmRsZVBlcmlvZENoYW5nZX0gZGVmYXVsdFZhbHVlPXtwZXJpb2R9PlxuICAgICAgICAgICAgICAgICAgICAgICAge1xuICAgICAgICAgICAgICAgICAgICAgICAgICAgIE9iamVjdC5rZXlzKHBlcmlvZHMpLm1hcChrID0+IHtcbiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgcmV0dXJuIDxvcHRpb24ga2V5PXtrfSB2YWx1ZT17a30+e3BlcmlvZHNba119PC9vcHRpb24+XG4gICAgICAgICAgICAgICAgICAgICAgICAgICAgfSlcbiAgICAgICAgICAgICAgICAgICAgICAgIH1cbiAgICAgICAgICAgICAgICAgICAgICAgIDwvc2VsZWN0PlxuICAgICAgICAgICAgICAgICAgICA8L2xhYmVsPjwvZGl2PlxuICAgICAgICAgICAgICAgICAgICA8ZGl2PjxsYWJlbD5cbiAgICAgICAgICAgICAgICAgICAgICAgIFNvdXJjZSBkZXMgZG9ubsOpZXNcbiAgICAgICAgICAgICAgICAgICAgICAgIDxzZWxlY3Qgb25DaGFuZ2U9e2hhbmRsZVNvdXJjZUNoYW5nZX0gZGVmYXVsdFZhbHVlPXtzb3VyY2V9PlxuICAgICAgICAgICAgICAgICAgICAgICAge1xuICAgICAgICAgICAgICAgICAgICAgICAgICAgIE9iamVjdC5rZXlzKHNvdXJjZXMpLm1hcChrID0+IHtcbiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgcmV0dXJuIDxvcHRpb24ga2V5PXtrfSB2YWx1ZT17a30+e3NvdXJjZXNba119PC9vcHRpb24+XG4gICAgICAgICAgICAgICAgICAgICAgICAgICAgfSlcbiAgICAgICAgICAgICAgICAgICAgICAgIH1cbiAgICAgICAgICAgICAgICAgICAgICAgIDwvc2VsZWN0PlxuICAgICAgICAgICAgICAgICAgICA8L2xhYmVsPjwvZGl2PlxuICAgICAgICAgICAgICAgICAgICA8dGFibGU+XG4gICAgICAgICAgICAgICAgICAgIDx0Ym9keT5cbiAgICAgICAgICAgICAgICAgICAge1xuICAgICAgICAgICAgICAgICAgICAgICAgY2F0cy5tYXAoY2F0ID0+IHtcbiAgICAgICAgICAgICAgICAgICAgICAgICAgICByZXR1cm4gKFxuICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICA8dHIga2V5PXtjYXR9PlxuICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgPHRkPlxuICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIDxsYWJlbD57c2hvd1tjYXRdfTxpbnB1dCB0eXBlPVwiY2hlY2tib3hcIiBjaGVja2VkPXtzaG93W2NhdF19IG9uQ2hhbmdlPXtlID0+IGhhbmRsZVNob3dDaGFuZ2UoY2F0LCBlLnRhcmdldC5jaGVja2VkKX0gLz5cbiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICB7Y2F0fTwvbGFiZWw+XG4gICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICA8L3RkPlxuICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgPHRkPlxuICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAge09iamVjdC5rZXlzKGNhdE1hcHBpbmcpLm1hcChjYXRJZCA9PiB7XG4gICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgaWYgKGNhdE1hcHBpbmdbY2F0SWRdLmNhdCA9PT0gY2F0KSB7XG4gICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIHJldHVybiA8ZGl2IGtleT17Y2F0SWR9PjxzcGFuIHN0eWxlPXt7Y29sb3I6Y29sb3JzKGNhdElkKX19PuKXvDwvc3Bhbj4mbmJzcDt7Y2F0TWFwcGluZ1tjYXRJZF0ubmFtZSB8fCBjYXRNYXBwaW5nW2NhdElkXS5jYXR9PC9kaXY+XG4gICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgfVxuICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgfSl9XG4gICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICA8L3RkPlxuICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICA8L3RyPlxuICAgICAgICAgICAgICAgICAgICAgICAgICAgIClcbiAgICAgICAgICAgICAgICAgICAgICAgIH0pXG4gICAgICAgICAgICAgICAgICAgIH1cbiAgICAgICAgICAgICAgICAgICAgPC90Ym9keT5cbiAgICAgICAgICAgICAgICAgICAgPC90YWJsZT5cbiAgICAgICAgICAgICAgICA8L2Rpdj5cbiAgICAgICAgICB7YmVuZWZpdHMubWFwKGIgPT4ge1xuICAgICAgICAgICAgbGV0IGwgPSBiLmxhYmVsXG4gICAgICAgICAgICBsZXQgZGF0YSA9IGFwcGx5KHNvdXJjZSwgYiwgc2hvdylcblxuICAgICAgICAgICAgaWYgKCFkYXRhLmxlbmd0aCkge1xuICAgICAgICAgICAgICAgIHJldHVyblxuICAgICAgICAgICAgfVxuXG4gICAgICAgICAgICByZXR1cm4gKFxuICAgICAgICAgICAgICAgIDxkaXYga2V5PXtsfSBjbGFzc05hbWU9XCJjZWxsXCI+XG4gICAgICAgICAgICAgICAgICAgIDxoMz57bH08L2gzPlxuICAgICAgICAgICAgICAgICAgICA8ZGl2IGNsYXNzTmFtZT1cImNoYXJ0XCI+XG4gICAgICAgICAgICAgICAgICAgICAgICA8TXlSZXNwb25zaXZlQmFyIGRhdGE9e2RhdGF9IC8+XG4gICAgICAgICAgICAgICAgICAgIDwvZGl2PlxuICAgICAgICAgICAgICAgIDwvZGl2PlxuICAgICAgICAgICAgKVxuICAgICAgICAgIH0pfVxuICAgICAgICAgIDwvZGl2PlxuICAgICAgICA8L2Rpdj5cbiAgICApO1xufVxuXG5leHBvcnQgZGVmYXVsdCBIb21lO1xuIl19 */\n/*@ sourceURL=/home/thomas/repos/mes-aides-stats/next/pages/index.js */"), react__WEBPACK_IMPORTED_MODULE_8___default.a.createElement("p", {
+    className: "jsx-1655332064",
+    __source: {
+      fileName: _jsxFileName,
+      lineNumber: 135
+    },
+    __self: this
+  }, "Les graphiques suivants repr\xE9sentent les taux de conversion sur la page de pr\xE9sentation de r\xE9sultats sur le simulateur. Diff\xE9rents \xE9v\xE8nements sont captur\xE9s pour mieux \xE9valuer l'impact du simulateur sur le non-recours aux dispositifs pr\xE9sent\xE9s aux usagers."), react__WEBPACK_IMPORTED_MODULE_8___default.a.createElement("div", {
     className: "jsx-1655332064" + " " + "list",
     __source: {
       fileName: _jsxFileName,
-      lineNumber: 134
+      lineNumber: 139
     },
     __self: this
   }, react__WEBPACK_IMPORTED_MODULE_8___default.a.createElement("div", {
     className: "jsx-1655332064" + " " + "cell",
     __source: {
       fileName: _jsxFileName,
-      lineNumber: 135
+      lineNumber: 140
     },
     __self: this
   }, react__WEBPACK_IMPORTED_MODULE_8___default.a.createElement("div", {
     className: "jsx-1655332064",
     __source: {
       fileName: _jsxFileName,
-      lineNumber: 136
+      lineNumber: 141
     },
     __self: this
   }, react__WEBPACK_IMPORTED_MODULE_8___default.a.createElement("label", {
     className: "jsx-1655332064",
     __source: {
       fileName: _jsxFileName,
-      lineNumber: 136
+      lineNumber: 141
     },
     __self: this
   }, "P\xE9riode de r\xE9f\xE9rence", react__WEBPACK_IMPORTED_MODULE_8___default.a.createElement("select", {
@@ -40510,7 +43204,7 @@ function Home() {
     className: "jsx-1655332064",
     __source: {
       fileName: _jsxFileName,
-      lineNumber: 138
+      lineNumber: 143
     },
     __self: this
   }, _babel_runtime_corejs2_core_js_object_keys__WEBPACK_IMPORTED_MODULE_6___default()(periods).map(function (k) {
@@ -40520,7 +43214,7 @@ function Home() {
       className: "jsx-1655332064",
       __source: {
         fileName: _jsxFileName,
-        lineNumber: 141
+        lineNumber: 146
       },
       __self: this
     }, periods[k]);
@@ -40528,14 +43222,14 @@ function Home() {
     className: "jsx-1655332064",
     __source: {
       fileName: _jsxFileName,
-      lineNumber: 146
+      lineNumber: 151
     },
     __self: this
   }, react__WEBPACK_IMPORTED_MODULE_8___default.a.createElement("label", {
     className: "jsx-1655332064",
     __source: {
       fileName: _jsxFileName,
-      lineNumber: 146
+      lineNumber: 151
     },
     __self: this
   }, "Source des donn\xE9es", react__WEBPACK_IMPORTED_MODULE_8___default.a.createElement("select", {
@@ -40544,7 +43238,7 @@ function Home() {
     className: "jsx-1655332064",
     __source: {
       fileName: _jsxFileName,
-      lineNumber: 148
+      lineNumber: 153
     },
     __self: this
   }, _babel_runtime_corejs2_core_js_object_keys__WEBPACK_IMPORTED_MODULE_6___default()(sources).map(function (k) {
@@ -40554,7 +43248,7 @@ function Home() {
       className: "jsx-1655332064",
       __source: {
         fileName: _jsxFileName,
-        lineNumber: 151
+        lineNumber: 156
       },
       __self: this
     }, sources[k]);
@@ -40562,14 +43256,14 @@ function Home() {
     className: "jsx-1655332064",
     __source: {
       fileName: _jsxFileName,
-      lineNumber: 156
+      lineNumber: 161
     },
     __self: this
   }, react__WEBPACK_IMPORTED_MODULE_8___default.a.createElement("tbody", {
     className: "jsx-1655332064",
     __source: {
       fileName: _jsxFileName,
-      lineNumber: 157
+      lineNumber: 162
     },
     __self: this
   }, cats.map(function (cat) {
@@ -40578,21 +43272,21 @@ function Home() {
       className: "jsx-1655332064",
       __source: {
         fileName: _jsxFileName,
-        lineNumber: 161
+        lineNumber: 166
       },
       __self: this
     }, react__WEBPACK_IMPORTED_MODULE_8___default.a.createElement("td", {
       className: "jsx-1655332064",
       __source: {
         fileName: _jsxFileName,
-        lineNumber: 162
+        lineNumber: 167
       },
       __self: this
     }, react__WEBPACK_IMPORTED_MODULE_8___default.a.createElement("label", {
       className: "jsx-1655332064",
       __source: {
         fileName: _jsxFileName,
-        lineNumber: 163
+        lineNumber: 168
       },
       __self: this
     }, show[cat], react__WEBPACK_IMPORTED_MODULE_8___default.a.createElement("input", {
@@ -40604,14 +43298,14 @@ function Home() {
       className: "jsx-1655332064",
       __source: {
         fileName: _jsxFileName,
-        lineNumber: 163
+        lineNumber: 168
       },
       __self: this
     }), cat)), react__WEBPACK_IMPORTED_MODULE_8___default.a.createElement("td", {
       className: "jsx-1655332064",
       __source: {
         fileName: _jsxFileName,
-        lineNumber: 166
+        lineNumber: 171
       },
       __self: this
     }, _babel_runtime_corejs2_core_js_object_keys__WEBPACK_IMPORTED_MODULE_6___default()(catMapping).map(function (catId) {
@@ -40621,7 +43315,7 @@ function Home() {
           className: "jsx-1655332064",
           __source: {
             fileName: _jsxFileName,
-            lineNumber: 169
+            lineNumber: 174
           },
           __self: this
         }, react__WEBPACK_IMPORTED_MODULE_8___default.a.createElement("span", {
@@ -40631,7 +43325,7 @@ function Home() {
           className: "jsx-1655332064",
           __source: {
             fileName: _jsxFileName,
-            lineNumber: 169
+            lineNumber: 174
           },
           __self: this
         }, "\u25FC"), "\xA0", catMapping[catId].name || catMapping[catId].cat);
@@ -40650,28 +43344,28 @@ function Home() {
       className: "jsx-1655332064" + " " + "cell",
       __source: {
         fileName: _jsxFileName,
-        lineNumber: 189
+        lineNumber: 194
       },
       __self: this
     }, react__WEBPACK_IMPORTED_MODULE_8___default.a.createElement("h3", {
       className: "jsx-1655332064",
       __source: {
         fileName: _jsxFileName,
-        lineNumber: 190
+        lineNumber: 195
       },
       __self: this
     }, l), react__WEBPACK_IMPORTED_MODULE_8___default.a.createElement("div", {
       className: "jsx-1655332064" + " " + "chart",
       __source: {
         fileName: _jsxFileName,
-        lineNumber: 191
+        lineNumber: 196
       },
       __self: this
     }, react__WEBPACK_IMPORTED_MODULE_8___default.a.createElement(MyResponsiveBar, {
       data: data,
       __source: {
         fileName: _jsxFileName,
-        lineNumber: 192
+        lineNumber: 197
       },
       __self: this
     })));
